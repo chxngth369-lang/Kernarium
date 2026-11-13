@@ -16,7 +16,7 @@ jobs:
       - name: Step 1 - Download Official IPA
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y erofs-utils e2fsprogs attr unzip zip wget curl jq
+          sudo apt-get install -y e2fsprogs android-sdk-libsparse-utils kpartx fdisk unzip zip wget curl jq
 
           mkdir -p work
           REL_JSON=$(curl -s https://api.github.com/repos/imxieyi/Kernarium/releases)
@@ -27,80 +27,83 @@ jobs:
           wget -q -O Andarium.ipa "$IPA_URL" || curl -L -o Andarium.ipa "$IPA_URL"
           unzip -q Andarium.ipa -d work
 
-      - name: Step 2 - Extract Read-Only, Debloat & Repackage Matching Original FS Type
+      - name: Step 2 - In-Place Partition Debloat & UI Injection (Zero Size/Header Change)
         run: |
           SYS_IMG=$(find work -name "system.img" | head -n 1)
           ORIG_SIZE=$(stat -c%s "$SYS_IMG")
-          ORIG_UUID=$(sudo blkid -s UUID -o value "$SYS_IMG" || true)
-          FS_TYPE=$(sudo blkid -s TYPE -o value "$SYS_IMG" || true)
-          echo "Original size: $ORIG_SIZE bytes | FS_TYPE: $FS_TYPE | UUID: $ORIG_UUID"
-          file "$SYS_IMG"
+          echo "=== Inspecting $SYS_IMG (Exact Size: $ORIG_SIZE bytes) ==="
+          file "$SYS_IMG" || true
+          fdisk -l "$SYS_IMG" || true
 
-          sudo mkdir -p /tmp/sys_extract /mnt/ro
-
-          # 1) เมานต์แบบ Read-Only (ro) เท่านั้น! ไม่มีวันติด exit code 32 แน่นอน 100%
-          if sudo mount -o loop,ro "$SYS_IMG" /mnt/ro; then
-            echo "Mounted Read-Only successfully! Copying all files with SELinux xattrs..."
-            sudo cp -a /mnt/ro/. /tmp/sys_extract/
-            sudo umount /mnt/ro
-          else
-            echo "Extracting with fsck.erofs..."
-            sudo fsck.erofs --extract=/tmp/sys_extract "$SYS_IMG"
-          fi
-
-          if [ -d "/tmp/sys_extract/system/app" ]; then
-            SYS_ROOT="/tmp/sys_extract/system"
-          else
-            SYS_ROOT="/tmp/sys_extract"
-          fi
-
-          # 2) ลบแอปขยะ ไฟล์เสียง แอนิเมชันบูต และฟอนต์ CJK ขนาดใหญ่เพื่อรีดความลื่นสูงสุด
-          sudo rm -rf "$SYS_ROOT"/product/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email} || true
-          sudo rm -rf "$SYS_ROOT"/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email,LiveWallpapersPicker,PhotoTable,BasicDreams,BookmarkProvider,BuiltInPrintService,EasterEgg,PrintSpooler,SimAppDialog,Stk,WallpaperBackup} || true
-          sudo rm -rf "$SYS_ROOT"/media/bootanimation.zip "$SYS_ROOT"/product/media/bootanimation.zip || true
-          sudo rm -rf "$SYS_ROOT"/media/audio/{alarms,notifications,ringtones} "$SYS_ROOT"/product/media/audio/{alarms,notifications,ringtones} || true
-          sudo rm -rf "$SYS_ROOT"/tts "$SYS_ROOT"/product/tts || true
-          sudo rm -f "$SYS_ROOT"/fonts/NotoSansCJK* "$SYS_ROOT"/fonts/NotoSerifCJK* || true
-
-          # 3) ปรับค่าความลื่นใน build.prop และรักษา SELinux Context เดิมของ build.prop
-          if [ -f "$SYS_ROOT/build.prop" ]; then
-            sudo cp -a "$SYS_ROOT/build.prop" /tmp/build.prop.bak
-            printf "\ndebug.sf.nobootanimation=1\nro.config.low_ram=true\nro.surface_flinger.max_frame_buffer_acquired_buffers=3\n" | sudo tee -a "$SYS_ROOT/build.prop" > /dev/null
-            sudo chcon --reference=/tmp/build.prop.bak "$SYS_ROOT/build.prop" || true
-          fi
-
-          # 4) ฝังหน้า UI เข้าเกมและคัดลอกค่า SELinux จากไฟล์ระบบเดิม
-          sudo mkdir -p "$SYS_ROOT/etc/custom_launcher" "$SYS_ROOT/etc/init"
+          # สร้างไฟล์ HTML หน้า UI และสคริปต์ Autostart เตรียมไว้ที่ /tmp
           UI_B64="PCFET0NUWVBFIGh0bWw+PGh0bWwgbGFuZz0idGgiPjxoZWFkPjxtZXRhIGNoYXJzZXQ9IlVURi04Ij48bWV0YSBuYW1lPSJ2aWV3cG9ydCIgY29udGVudD0id2lkdGg9ZGV2aWNlLXdpZHRoLGluaXRpYWwtc2NhbGU9MS4wIj48dGl0bGU+R2FtZSBMYXVuY2hlcjwvdGl0bGU+PHN0eWxlPip7Ym94LXNpemluZzpi3JkZXItYm94O21hcmdpbjowO3BhZGRpbmc6MDt1c2VyLXNlbGVjdDpub25lO2ZvbnQtZmFtaWx5Oi1hcHBsZS1zeXN0ZW0sc2Fucy1zZXJpZn1ib2R5e3dpZHRoOjEwMHZ3O2hlaWdodDoxMDB2aDtPdmVyZmxvdzpoaWRkZW47YmFja2dyb3VuZDpyYWRpYWwtZ3JhZGllbnQoY2lyY2xlIGF0IDc1JSAyNSUsIzVhMzgyNSAwJSwjMTQxNDE5IDcwJSk7Y29sb3I6I2ZmZjkaXNwbGF5OmZsZXh9LnNpZGViYXJ7d2lkdGg6NjhweDtoZWlnaHQ6MTAwJTtiYWNrZ3JvdW5kOnJnYmEoMCwwLDAsMC44NSk7ZGlzcGxheTpmbGV4O2ZsZXgtZGlyZWN0aW9uOmNvbHVtbjthbGlnbi1pdGVtczpjZW50ZXI7cGFkZGluZzoyMHB4IDA7Ym9yZGVyLXJpZ2h0OjFweCBzb2xpZCByZ2JhKDI1NSwyNTUsMjU1LDAuMSl9LmxvZ28tYm94e3dpZHRoOjQwcHg7aGVpZ2h0OjQwcHg7YmFja2dyb3VuZDojZmY5NTAwO2JvcmRlci1yYWRpdXM6OHB4O2Rpc3BsYXk6ZmxleDthbGlnbi1pdGVtczpjZW50ZXI7anVzdGlmeS1jb250ZW50OmNlbnRlcjtmb250LXdlaWdodDo5MDA7Y29sb3I6IzAwMDtmb250LXNpemU6MThweDttYXJnaW4tYm90dG9tOjI0cHh9LmdhbWUtaWNvbnt3aWR0aDo0MHB4O2hlaWdodDo0MHB4O2JhY2tncm91bmQ6cmdiYSgyNTUsMjU1LDI1NSwwLjE1KTtib3JkZXItcmFkaXVzOjhweDtib3JkZXItbGVmdDo0cHggc29saWQgI2ZmOTUwMDtkaXNwbGF5OmZsZXg7YWxpZ24taXRlbXM6Y2VudGVyO2p1c3RpZnktY29udGVudDpjZW50ZXI7Zm9udC13ZWlnaHQ6ODAwO2ZvbnQtc2l6ZToxMnB4fS5tYWlue2ZsZXg6MTtkaXNwbGF5OmZsZXg7ZmxleC1kaXJlY3Rpb246Y29sdW1uO2p1c3RpZnktY29udGVudDpzcGFjZS1iZXR3ZWVuO3BhZGRpbmc6MjRweCA0NHB4IDcwcHggNDRweDtwb3NpdGlvbjpyZWxhdGl2ZX0udG9wbmF2e2Rpc3BsYXk6ZmxleDtqdXN0aWZ5LWNvbnRlbnQ6ZmxleC1lbmQ7YWxpZ24taXRlbXM6Y2VudGVyO2dhcDozMnB4O2ZvbnQtc2l6ZToxNnB4O2ZvbnQtd2VpZ2h0OjYwMH0udGFie2NvbG9yOnJnYmEoMjU1LDI1NSwyNTUsMC42KTtjdXJzb3I6cG9pbnRlcn0udGFiLmFjdGl2ZXtjb2xvcjojZmZmO2ZvbnQtd2VpZ2h0OjgwMDtib3JkZXItYm90dG9tOjJweCBzb2xpZCAjZmY5NTAwO3BhZGRpbmctYm90dG9tOjRweH0uY29udGVudC1yb3d7ZGlzcGxheTpmbGV4O2FsaWduLWl0ZW1zOmZsZXgtZW5kO2p1c3RpZnktY29udGVudDpzcGFjZS1iZXR3ZWVuO2dhcDo0MHB4O21hcmdpbi10b3A6YXV0b30ubGVmdC1jb2x7ZGlzcGxheTpmbGV4O2ZsZXgtZGlyZWN0aW9uOmNvbHVtbjtnYXA6MjBweH0uZ2FtZS10aXRsZXtmb250LXNpemU6NjJweDtmb250LXdlaWdodDo5MDA7dGV4dC1zaGFkb3c6MCA0cHggMTJweCByZ2JhKDAsMCwwLDAuOCk7bGluZS1oZWlnaHQ6MX0uZ2FtZS1zdWJ7Zm9udC1zaXplOjI0cHg7Zm9udC13ZWlnaHQ6ODAwO2NvbG9yOiNmZjNiMzA7bGV0dGVyLXNwYWNpbmc6NHB4fS5wbGF5LWJ0bnt3aWR0aDoyODBweDtoZWlnaHQ6NThweDtiYWNrZ3JvdW5kOmxpbmVhci1ncmFkaWVudCgxODBkZWcsI2ZmZiAwJSwjZGNkY2RjIDEwMCUpO2NvbG9yOiMwMDA7Ym9yZGVyOm5vbmU7Ym9yZGVyLXJhZGl1czo2cHg7Ym9yZGVyLWJvdHRvbTo0cHggc29saWQgI2ZmOTUwMDtmb250LXNpemU6MjBweDtmb250LXdlaWdodDo4MDA7ZGlzcGxheTpmbGV4O2FsaWduLWl0ZW1zOmNlbnRlcjtqdXN0aWZ5LWNvbnRlbnQ6Y2VudGVyO2dhcDoxMHB4O2N1cnNvcjpwb2ludGVyfS5jYXJkc3tkaXNwbGF5OmZsZXg7Z2FwOjE4cHh9LmNhcmR7d2lkdGg6MjMwcHg7aGVpZ2h0OjI3MHB4O2JvcmRlci1yYWRpdXM6NnB4O2JhY2tncm91bmQ6bGluZWFyLWdyYWRpZW50KDE4MGRlZyxyZ2JhKDI1NSwxNDksMCwwLjI1KSAwJSxyZ2JhKDAsMCwwLDAuOTIpIDEwMCUpO2JvcmRlcjoxcHggc29saWQgcmdiYSgyNTUsMjU1LDI1NSwwLjIpO2Rpc3BsYXk6ZmxleDtmbGV4LWRpcmVjdGlvbjpjb2x1bW47anVzdGlmeS1jb250ZW50OmZsZXgtZW5kO3Bvc2l0aW9uOnJlbGF0aXZlO2N1cnNvcjpwb2ludGVyO292ZXJmbG93OmhpZGRlbn0uY2FyZC5zZWxlY3RlZHtib3JkZXI6M3B4IHNvbGlkICNmZjk1MDA7Ym94LXNoYWRvdzowIDAgMjBweCByZ2JhKDI1NSwxNDksMCwwLjQpfS5iYWRnZXtwb3NpdGlvbjphYnNvbHV0ZTt0b3A6MTBweDtyaWdodDoxMHB4O2JhY2tncm91bmQ6I2ZmZjtjb2xvcjojMDAwO2ZvbnQtc2l6ZToxMnB4O2ZvbnQtd2VpZ2h0OjgwMDtwYWRkaW5nOjRweCAxMHB4O2JvcmRlci1yYWRpdXM6NHB4fS5mcHMtbnVte2ZvbnQtc2l6ZTo2NHB4O2ZvbnQtd2VpZ2h0OjkwMDtwYWRkaW5nOjAgMTZweDtsaW5lLWhlaWdodDoxfS5mcHMtbnVtIHNwYW57Zm9udC1zaXplOjIwcHg7bWFyZ2luLWxlZnQ6NHB4fS5jYXJkLWRlc2N7YmFja2dyb3VuZDpyZ2JhKDAsMCwwLDAuODgpO3BhZGRpbmc6MTJweCAxNHB4O2ZvbnQtc2l6ZToxM3B4O2ZvbnQtd2VpZ2h0OjcwMDttYXJnaW4tdG9wOjhweH0uc3RhdHVzLXBpbGx7cG9zaXRpb246YWJzb2x1dGU7dG9wOjE4cHg7bGVmdDo1MCU7dHJhbnNsYXRlWCgtNTAlKTtiYWNrZ3JvdW5kOnJnYmEoMjU1LDI1NSwyNTUsMC45Mik7Y29sb3I6IzAwMDtwYWRkaW5nOjhweCAyMHB4O2JvcmRlci1yYWRpdXM6MjRweDtmb250LXdlaWdodDo3MDA7Zm9udC1zaXplOjEzcHh9PC9zdHlsZT48L2hlYWQ+PGJvZHk+PGRpdiBjbGFzcz0ic2lkZWJhciI+PGRpdiBjbGFzcz0ibG9nby1ib3giPkYyPC9kaXY+PGRpdiBjbGFzcz0iZ2FtZS1pY29uIj5HQjI3PC9kaXY+PC9kaXY+PGRpdiBjbGFzcz0ibWFpbiI+PGRpdiBjbGFzcz0ic3RhdHVzLXBpbGwiIGlkPSJzdGF0dXNUZXh0Ij5HYW1lIE1vZGUgUmVhZHkgKDYwIEZQUyk8L2Rpdj48ZGl2IGNsYXNzPSJ0b3BuYXYiPjxkaXYgY2xhc3M9InRhYiBhY3RpdmUiPkdhbWU8L2Rpdj48ZGl2IGNsYXNzPSJ0YWIiPk1vZHM8L2Rpdj48ZGl2IGNsYXNzPSJ0YWIiPkluZm88L2Rpdj48ZGl2IGNsYXNzPSJ0YWIiPlNldHRpbmdzPC9kaXY+PC9kaXY+PGRpdiBjbGFzcz0iY29udGVudC1yb3ciPjxkaXYgY2xhc3M9ImxlZnQtY29sIj48ZGl2PjxkaXYgY2xhc3M9ImdhbWUtdGl0bGUiPkdPUkVCT1g8L2Rpdj48ZGl2IGNsYXNzPSJnYW1lLXN1YiI+QU5JTU9TSVRZIDI3PC9kaXY+PC9kaXY+PGJ1dHRvbiBjbGFzcz0icGxheS1idG4iIG9uY2xpY2s9ImxhdW5jaEdhbWUoKSI+UExBWTwvYnV0dG9uPjwvZGl2PjxkaXYgY2xhc3M9ImNhcmRzIj48ZGl2IGNsYXNzPSJjYXJkIiBvbmNsaWNrPSJzZWxlY3RQcmVzZXQoMCkiPjxkaXYgY2xhc3M9ImZwcy1udW0iPjMwPHNwYW4+RlBTPC9zcGFuPjwvZGl2PjxkaXYgY2xhc3M9ImNhcmQtZGVzYyI+QmF0dGVyeSBTYXZlcjogQ29vbDwvZGl2PjwvZGl2PjxkaXYgY2xhc3M9ImNhcmQiIG9uY2xpY2s9InNlbGVjdFByZXNldCgxKSI+PGRpdiBjbGFzcz0iYmFkZ2UiPlJlY29tbWVuZGVkPC9kaXY+PGRpdiBjbGFzcz0iZnBzLW51bSI+MzA8c3Bhbj5GUFM8L3NwYW4+PC9kaXY+PGRpdiBjbGFzcz0iY2FyZC1kZXNjIj5CYWxhbmNlZDogSGlnaCBHcmFwaGljczwvZGl2PjwvZGl2PjxkaXYgY2xhc3M9ImNhcmQgc2VsZWN0ZWQiIG9uY2xpY2s9InNlbGVjdFByZXNldCgyKSI+PGRpdiBjbGFzcz0iYmFkZ2UiPk1heCBGUFM8L2Rpdj48ZGl2IGNsYXNzPSJmcHMtbnVtIj42MDxzcGFuPkZQUzwvc3Bhbj48L2Rpdj48ZGl2IGNsYXNzPSJjYXJkLWRlc2MiPlBlcmZvcm1hbmNlOiA2MCBGUFM8L2Rpdj48L2Rpdj48L2Rpdj48L2Rpdj48L2Rpdj48c2NyaXB0PmZ1bmN0aW9uIHNlbGVjdFByZXNldChpKXtkb2N1bWVudC5xdWVyeVNlbGVjdG9yQWxsKCcuY2FyZCcpLmZvckVhY2goKGMs4peGSK9jLmNsYXNzTGlzdC50b2dnbGUoJ3NlbGVjdGVkJyxpPT094peGKTt9ZnVuY3Rpb24gbGF1bmNoR2FtZSgpe3dpbmRvdy5sb2NhdGlvbi5ocmVmPSdpbnRlbnQ6I0ludGVudDthY3Rpb249YW5kcm9pZC5pbnRlbnQuYWN0aW9uLk1BSU47Y2F0ZWdvcnk9YW5kcm9pZC5pbnRlbnQuY2F0ZWdvcnkuTEFVTkNIRVI7cGFja2FnZT1jb20uRjJHYW1lcy5HQkRFO2VuZCc7fTwvc2NyaXB0PjwvYm9keT48L2h0bWw+"
-          echo "$UI_B64" | base64 -d | sudo tee "$SYS_ROOT/etc/custom_launcher/index.html" > /dev/null
-          sudo chmod 755 "$SYS_ROOT/etc/custom_launcher"
-          sudo chmod 644 "$SYS_ROOT/etc/custom_launcher/index.html"
-          sudo chcon -R --reference="$SYS_ROOT/etc" "$SYS_ROOT/etc/custom_launcher" 2>/dev/null || true
+          echo "$UI_B64" | base64 -d > /tmp/index.html
+          printf "on property:sys.boot_completed=1\n    exec - root root -- /system/bin/sh -c \"settings put global window_animation_scale 0 && settings put global transition_animation_scale 0 && settings put global animator_duration_scale 0 && am start -a android.intent.action.VIEW -d file:///system/etc/custom_launcher/index.html\"\n" > /tmp/autostart_ui.rc
 
-          # 5) แพ็กกลับตามชนิดของระบบไฟล์เดิมเป๊ะๆ (รองรับทั้ง EROFS และ EXT4 พร้อม UUID เดิม!)
-          rm -f "$SYS_IMG"
-          if [ "$FS_TYPE" = "erofs" ]; then
-            echo "Rebuilding as EROFS image..."
-            if [ -n "$ORIG_UUID" ]; then
-              sudo mkfs.erofs -U "$ORIG_UUID" "$SYS_IMG" /tmp/sys_extract
-            else
-              sudo mkfs.erofs "$SYS_IMG" /tmp/sys_extract
+          # เชื่อมต่อ Loop Device พร้อมสแกน Partition Table (-P)
+          LOOP_DEV=$(sudo losetup --find --show -P "$SYS_IMG")
+          echo "Attached loop device: $LOOP_DEV"
+          ls -la "${LOOP_DEV}"* || true
+
+          # หาพาร์ทิชัน EXT4 ข้างในดิสก์ (ถ้ามีพาร์ทิชันย่อย p1, p2... หรือตัวดิสก์เอง)
+          for PART in "${LOOP_DEV}"p* "$LOOP_DEV"; do
+            if [ -e "$PART" ]; then
+              FST=$(sudo blkid -s TYPE -o value "$PART" 2>/dev/null || true)
+              echo "Checking $PART -> TYPE=$FST"
+              if [ "$FST" = "ext4" ] || [ "$FST" = "ext2" ]; then
+                echo "Found EXT4 partition at $PART! Unlocking and mounting in-place..."
+                sudo e2fsck -f -y "$PART" || true
+                sudo e2fsck -E unshare_blocks -f -y "$PART" || true
+                sudo tune2fs -O ^read-only "$PART" || true
+
+                sudo mkdir -p /mnt/part
+                if sudo mount -o rw "$PART" /mnt/part 2>/dev/null; then
+                  echo "Successfully mounted $PART in-place RW!"
+                  if [ -d "/mnt/part/system/app" ]; then
+                    SR="/mnt/part/system"
+                  elif [ -d "/mnt/part/app" ]; then
+                    SR="/mnt/part"
+                  else
+                    SR=""
+                  fi
+
+                  if [ -n "$SR" ]; then
+                    echo "Debloating Android system at $SR..."
+                    sudo rm -rf "$SR"/product/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email} || true
+                    sudo rm -rf "$SR"/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email,LiveWallpapersPicker,PhotoTable,BasicDreams,EasterEgg} || true
+                    sudo rm -rf "$SR"/media/bootanimation.zip "$SR"/product/media/bootanimation.zip || true
+                    sudo rm -rf "$SR"/media/audio/{alarms,notifications,ringtones} "$SR"/product/media/audio/{alarms,notifications,ringtones} || true
+                    sudo rm -f "$SR"/fonts/NotoSansCJK* "$SR"/fonts/NotoSerifCJK* || true
+
+                    if [ -f "$SR/build.prop" ]; then
+                      sudo cp -a "$SR/build.prop" /tmp/bp.bak
+                      printf "\ndebug.sf.nobootanimation=1\nro.surface_flinger.max_frame_buffer_acquired_buffers=3\n" | sudo tee -a "$SR/build.prop" > /dev/null
+                      sudo chcon --reference=/tmp/bp.bak "$SR/build.prop" 2>/dev/null || true
+                    fi
+
+                    sudo mkdir -p "$SR/etc/custom_launcher" "$SR/etc/init"
+                    sudo cp /tmp/index.html "$SR/etc/custom_launcher/index.html"
+                    sudo cp /tmp/autostart_ui.rc "$SR/etc/init/autostart_ui.rc"
+                    sudo chmod 755 "$SR/etc/custom_launcher"
+                    sudo chmod 644 "$SR/etc/custom_launcher/index.html" "$SR/etc/init/autostart_ui.rc"
+                    sudo chcon -R --reference="$SR/etc" "$SR/etc/custom_launcher" 2>/dev/null || true
+                    sudo chcon --reference="$SR/etc/init" "$SR/etc/init/autostart_ui.rc" 2>/dev/null || true
+                  fi
+
+                  sync
+                  sudo umount /mnt/part
+                fi
+                sudo e2fsck -f -y "$PART" || true
+              fi
             fi
-          else
-            echo "Rebuilding as EXT4 Read-Only image with original UUID..."
-            truncate -s "$ORIG_SIZE" "$SYS_IMG"
-            UUID_ARG=""
-            if [ -n "$ORIG_UUID" ]; then UUID_ARG="-U $ORIG_UUID"; fi
-            sudo mkfs.ext4 -F -b 4096 -L "/" $UUID_ARG -O ^has_journal,shared_blocks -E android_sparse -d /tmp/sys_extract "$SYS_IMG" || \
-            sudo mkfs.ext4 -F -b 4096 -L "/" $UUID_ARG -O ^has_journal -d /tmp/sys_extract "$SYS_IMG"
-            sudo e2fsck -f -y "$SYS_IMG" || true
-            sudo tune2fs -O read-only "$SYS_IMG" || true
-          fi
+          done
 
-          # 6) ล็อกขนาดไฟล์ให้เท่ากับ 1048506368 bytes เป๊ะๆ ทุกไบต์!
+          sudo losetup -d "$LOOP_DEV" || true
+
+          # ตรวจสอบว่าขนาดไฟล์เท่ากับ 1048506368 bytes เท่าเดิมเป๊ะทุกไบต์!
           truncate -s "$ORIG_SIZE" "$SYS_IMG"
           FINAL_SIZE=$(stat -c%s "$SYS_IMG")
-          echo "Verified final exact size: $FINAL_SIZE bytes (Must equal $ORIG_SIZE)"
+          echo "Verified exact byte size: $FINAL_SIZE (Original: $ORIG_SIZE)"
 
       - name: Step 3 - Repackage IPA (Preserve Symlinks)
         run: |
