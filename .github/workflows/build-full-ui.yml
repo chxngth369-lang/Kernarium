@@ -9,28 +9,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Download Official IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set +e
           sudo apt-get update -y
           sudo apt-get install -y e2fsprogs unzip zip wget curl jq
 
           mkdir -p work
-          REL_JSON=$(curl -s https://api.github.com/repos/imxieyi/Kernarium/releases)
-          IPA_URL=$(echo "$REL_JSON" | jq -r '.[0].assets[] | select(.name | endswith(".ipa")) | .browser_download_url' | head -n 1)
+          REL_JSON=$(curl -s -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/imxieyi/Kernarium/releases)
+          IPA_URL=$(echo "$REL_JSON" | jq -r 'if type=="array" then .[0].assets[] | select(.name | endswith(".ipa")) | .browser_download_url else empty end' 2>/dev/null | head -n 1)
           if [ -z "$IPA_URL" ] || [ "$IPA_URL" = "null" ]; then
             IPA_URL="https://github.com/imxieyi/Kernarium/releases/download/1.0b9-beta/Andarium.ipa"
           fi
-          wget -q -O Andarium.ipa "$IPA_URL" || curl -L -o Andarium.ipa "$IPA_URL"
-          unzip -q Andarium.ipa -d work
+          echo "Downloading IPA from: $IPA_URL"
+          curl -fL --retry 3 -o Andarium.ipa "$IPA_URL" || wget -O Andarium.ipa "$IPA_URL"
+          unzip -q -o Andarium.ipa -d work
 
-      - name: Step 2 - Ultra Low-RAM Mod (Keep APK Installer 100% Intact)
+          SYS_CHECK=$(find work -name "system.img" | head -n 1)
+          if [ -z "$SYS_CHECK" ]; then
+            echo "ERROR: system.img not found after unzip!"
+            exit 1
+          fi
+          exit 0
+
+      - name: Step 2 - Ultra Low-RAM Mod (Safe Resize & Intact APK Installer)
         run: |
           set +e
           SYS_IMG=$(find work -name "system.img" | head -n 1)
           ORIG_SIZE=$(stat -c%s "$SYS_IMG")
-          ORIG_KB=$((ORIG_SIZE / 1024))
-          echo "Original system.img: $ORIG_SIZE bytes ($ORIG_KB KiB)"
+          ORIG_RO=$(sudo tune2fs -l "$SYS_IMG" 2>/dev/null | grep "Filesystem features:" | grep -o "read-only" || true)
+          echo "Original system.img size: $ORIG_SIZE bytes"
 
-          dd if=/dev/zero bs=1M count=800 >> "$SYS_IMG"
+          # ขยายพื้นที่ชั่วคราวเพื่อปลดล็อก shared_blocks อย่างปลอดภัย
+          dd if=/dev/zero bs=1M count=500 >> "$SYS_IMG"
           sudo e2fsck -f -y "$SYS_IMG"
           sudo resize2fs -f "$SYS_IMG"
           sudo e2fsck -E unshare_blocks -f -y "$SYS_IMG"
@@ -43,64 +55,93 @@ jobs:
             exit 1
           fi
 
-          if [ -d "/mnt/android/system/app" ]; then
-            SR="/mnt/android/system"
-          else
-            SR="/mnt/android"
-          fi
+          echo "=== Disk usage BEFORE debloat ==="
+          df -h /mnt/android
 
-          # 1) ลบแอปติดเครื่องที่เห็นในคลิปและไฟล์ฟอนต์/เสียงขนาดใหญ่ (ไม่แตะต้องระบบติดตั้ง APK)
-          sudo rm -rf "$SR"/product/app/{Aperture,Camera2,Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Music,Glimpse,Gallery2,Recorder,Email,Jelly,Browser2}
-          sudo rm -rf "$SR"/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Music,Glimpse,Gallery2,Recorder,Email,PhotoTable,BasicDreams,LiveWallpapersPicker,EasterEgg}
-          sudo rm -rf "$SR"/media/bootanimation.zip "$SR"/product/media/bootanimation.zip
-          sudo rm -rf "$SR"/media/audio/{alarms,notifications,ringtones} "$SR"/product/media/audio/{alarms,notifications,ringtones}
-          sudo rm -rf "$SR"/tts "$SR"/product/tts
-          sudo rm -f "$SR"/fonts/NotoSansCJK* "$SR"/fonts/NotoSerifCJK* "$SR"/product/fonts/NotoSansCJK*
-          sudo rm -f "$SR"/recovery-from-boot.p "$SR"/etc/recovery-resource.dat
+          # 1) ลบเฉพาะแอปติดเครื่องที่ไม่ใช้และฟอนต์ขนาดใหญ่ (เก็บระบบติดตั้ง APK ไว้ครบ 100%)
+          for BASE in "/mnt/android" "/mnt/android/system" "/mnt/android/product" "/mnt/android/system/product" "/mnt/android/system_ext" "/mnt/android/system/system_ext"; do
+            if [ -d "$BASE" ] && [ ! -L "$BASE" ]; then
+              sudo rm -rf "$BASE"/app/{ExactCalculator,Calculator,Etar,Calendar,DeskClock,Gallery2,Glimpse,Eleven,Music,Aperture,Camera2,Contacts,Messaging,Recorder,Email,Jelly,Browser2,PhotoTable,BasicDreams,LiveWallpapersPicker,EasterEgg}
+              sudo rm -rf "$BASE"/priv-app/{Gallery2,Glimpse,Eleven,Music,Contacts,Messaging,Recorder,Email}
+              sudo rm -rf "$BASE"/media/bootanimation.zip
+              sudo rm -rf "$BASE"/media/audio/{alarms,notifications,ringtones}
+              sudo rm -rf "$BASE"/tts
+              sudo rm -f "$BASE"/fonts/NotoSansCJK* "$BASE"/fonts/NotoSerifCJK*
+              sudo rm -f "$BASE"/recovery-from-boot.p "$BASE"/etc/recovery-resource.dat
+            fi
+          done
 
-          # 2) เปิดโหมด Android Go ประหยัด RAM ขั้นสุดใน build.prop ทุกจุด
-          for BP in "$SR/build.prop" "$SR/product/etc/build.prop" "$SR/system_ext/etc/build.prop"; do
-            if [ -f "$BP" ]; then
+          # 2) เปิดโหมด Android Go (Ultra Low-RAM) ใน build.prop ทุกพาร์ทิชัน
+          for BP in \
+            "/mnt/android/system/build.prop" \
+            "/mnt/android/build.prop" \
+            "/mnt/android/product/etc/build.prop" \
+            "/mnt/android/system/product/etc/build.prop" \
+            "/mnt/android/system_ext/etc/build.prop" \
+            "/mnt/android/system/system_ext/etc/build.prop"; do
+            if [ -f "$BP" ] && [ ! -L "$BP" ]; then
               sudo cp -a "$BP" /tmp/bp.ref
-              printf "\nro.config.low_ram=true\nro.lmk.kill_heaviest_task=false\nro.sys.fw.bg_apps_limit=1\nro.config.max_starting_bg=1\ndalvik.vm.heapstartsize=4m\ndalvik.vm.heapgrowthlimit=96m\ndalvik.vm.heapsize=192m\ndebug.sf.nobootanimation=1\nro.surface_flinger.max_frame_buffer_acquired_buffers=2\n" | sudo tee -a "$BP" > /dev/null
+              printf "\n# Ultra Low-RAM Tweaks\nro.config.low_ram=true\nro.lmk.kill_heaviest_task=false\nro.sys.fw.bg_apps_limit=2\nro.config.max_starting_bg=1\ndalvik.vm.heapstartsize=4m\ndalvik.vm.heapgrowthlimit=128m\ndalvik.vm.heapsize=256m\ndalvik.vm.heapminfree=512k\ndalvik.vm.heapmaxfree=4m\ndebug.sf.nobootanimation=1\nro.surface_flinger.max_frame_buffer_acquired_buffers=2\npersist.sys.sf.disable_blurs=1\nconfig.disable_rtt=true\n" | sudo tee -a "$BP" > /dev/null
               sudo chcon --reference=/tmp/bp.ref "$BP"
               rm -f /tmp/bp.ref
             fi
           done
 
-          # 3) ปรับจูน Kernel VM คืน RAM ทันทีหลังบูตและเปิด ZRAM อัตโนมัติ
-          REF_RC=$(find "$SR/etc/init" -maxdepth 1 -name "*.rc" | head -n 1)
-          printf "on init\n    write /proc/sys/vm/overcommit_memory 1\n    write /proc/sys/vm/swappiness 100\n    write /proc/sys/vm/vfs_cache_pressure 200\n\non property:sys.boot_completed=1\n    write /proc/sys/vm/drop_caches 3\n    write /proc/sys/vm/compact_memory 1\n    write /sys/block/zram0/disksize 1073741824\n" | sudo tee "$SR/etc/init/init.lowram.rc" > /dev/null
-          sudo chmod 644 "$SR/etc/init/init.lowram.rc"
-          if [ -n "$REF_RC" ]; then
-            sudo chcon --reference="$REF_RC" "$SR/etc/init/init.lowram.rc"
+          # 3) ตั้งค่า Kernel คืน RAM อัตโนมัติและเปิด ZRAM Swap 1GB ช่วยรับโหลดตอนเข้าเกม
+          if [ -d "/mnt/android/system/etc/init" ]; then
+            INIT_DIR="/mnt/android/system/etc/init"
           else
-            sudo chcon --reference="$SR/build.prop" "$SR/etc/init/init.lowram.rc"
+            INIT_DIR="/mnt/android/etc/init"
+          fi
+          REF_RC=$(find "$INIT_DIR" -maxdepth 1 -type f -name "*.rc" | head -n 1)
+          cat << 'EOF' | sudo tee "$INIT_DIR/init.lowram.rc" > /dev/null
+on init
+    write /proc/sys/vm/overcommit_memory 1
+    write /proc/sys/vm/swappiness 100
+    write /proc/sys/vm/vfs_cache_pressure 150
+
+on property:sys.boot_completed=1
+    write /proc/sys/vm/drop_caches 3
+    write /proc/sys/vm/compact_memory 1
+    exec_background u:r:su:s0 root root -- /system/bin/sh -c "settings put global window_animation_scale 0; settings put global transition_animation_scale 0; settings put global animator_duration_scale 0; if [ -b /dev/block/zram0 ]; then swapoff /dev/block/zram0 2>/dev/null; echo 1073741824 > /sys/block/zram0/disksize 2>/dev/null && mkswap /dev/block/zram0 >/dev/null 2>&1 && swapon /dev/block/zram0 2>/dev/null; fi"
+EOF
+          sudo chmod 644 "$INIT_DIR/init.lowram.rc"
+          if [ -n "$REF_RC" ]; then
+            sudo chcon --reference="$REF_RC" "$INIT_DIR/init.lowram.rc"
           fi
 
+          echo "=== Disk usage AFTER debloat ==="
           df -h /mnt/android
           sudo e4defrag /mnt/android >/dev/null 2>&1 || true
           sync
           sudo umount /mnt/android
 
-          # 4) หดพาร์ทิชันกลับไปที่ขนาด 1048506368 bytes เป๊ะๆ แบบไม่ตัดโดนข้อมูล
+          # 4) หดพาร์ทิชันลงต่ำสุด -> ขยายไฟล์กลับเป็นขนาดเดิม -> ขยายพาร์ทิชันให้พอดีเป๊ะโดยไม่เสียบล็อกข้อมูล
           sudo e2fsck -f -y "$SYS_IMG"
           sudo resize2fs -f -M "$SYS_IMG"
           sudo e2fsck -f -y "$SYS_IMG"
 
-          if ! sudo resize2fs -f "$SYS_IMG" "${ORIG_KB}K"; then
-            echo "ERROR: Could not fit into $ORIG_KB KiB!"
+          MIN_SIZE=$(stat -c%s "$SYS_IMG")
+          echo "Minimum shrunk size: $MIN_SIZE bytes (Target: $ORIG_SIZE bytes)"
+          if [ "$MIN_SIZE" -gt "$ORIG_SIZE" ]; then
+            echo "ERROR: Image still larger than $ORIG_SIZE bytes!"
             exit 1
           fi
+
+          truncate -s "$ORIG_SIZE" "$SYS_IMG"
+          sudo resize2fs -f "$SYS_IMG"
           sudo e2fsck -f -y "$SYS_IMG"
-          sudo tune2fs -O read-only "$SYS_IMG"
+          if [ -n "$ORIG_RO" ]; then
+            sudo tune2fs -O read-only "$SYS_IMG"
+          fi
           truncate -s "$ORIG_SIZE" "$SYS_IMG"
 
           FINAL_SIZE=$(stat -c%s "$SYS_IMG")
-          echo "Verified exact size: $FINAL_SIZE bytes"
+          echo "Verified exact final size: $FINAL_SIZE bytes"
           if [ "$FINAL_SIZE" != "$ORIG_SIZE" ]; then
             exit 1
           fi
+          exit 0
 
       - name: Step 3 - Repackage IPA
         run: |
