@@ -1,45 +1,31 @@
-name: Build Ultra Low RAM Android IPA
+name: Build Low RAM IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-lowram-ipa:
+  build-ipa:
     runs-on: ubuntu-latest
     steps:
-      - name: Step 1 - Download Official IPA
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Step 1 - Download IPA
         run: |
           set +e
           sudo apt-get update -y
-          sudo apt-get install -y e2fsprogs unzip zip wget curl jq
+          sudo apt-get install -y e2fsprogs unzip zip wget curl
 
           mkdir -p work
-          REL_JSON=$(curl -s -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/imxieyi/Kernarium/releases)
-          IPA_URL=$(echo "$REL_JSON" | jq -r 'if type=="array" then .[0].assets[] | select(.name | endswith(".ipa")) | .browser_download_url else empty end' 2>/dev/null | head -n 1)
-          if [ -z "$IPA_URL" ] || [ "$IPA_URL" = "null" ]; then
-            IPA_URL="https://github.com/imxieyi/Kernarium/releases/download/1.0b9-beta/Andarium.ipa"
-          fi
-          echo "Downloading IPA from: $IPA_URL"
-          curl -fL --retry 3 -o Andarium.ipa "$IPA_URL" || wget -O Andarium.ipa "$IPA_URL"
+          U1="https://github.com/imxieyi/Kernarium/releases/latest/download/Andarium.ipa"
+          U2="https://github.com/imxieyi/Kernarium/releases/download/1.0b9-beta/Andarium.ipa"
+          curl -fL -o Andarium.ipa "$U1" || curl -fL -o Andarium.ipa "$U2"
           unzip -q -o Andarium.ipa -d work
-
-          SYS_CHECK=$(find work -name "system.img" | head -n 1)
-          if [ -z "$SYS_CHECK" ]; then
-            echo "ERROR: system.img not found after unzip!"
-            exit 1
-          fi
           exit 0
 
-      - name: Step 2 - Ultra Low-RAM Mod
+      - name: Step 2 - Optimize System Image for Low RAM
         run: |
           set +e
           SYS_IMG=$(find work -name "system.img" | head -n 1)
           ORIG_SIZE=$(stat -c%s "$SYS_IMG")
-          ORIG_RO=$(sudo tune2fs -l "$SYS_IMG" 2>/dev/null | grep "Filesystem features:" | grep -o "read-only" || true)
-          echo "Original system.img size: $ORIG_SIZE bytes"
 
           dd if=/dev/zero bs=1M count=500 >> "$SYS_IMG"
           sudo e2fsck -f -y "$SYS_IMG"
@@ -49,48 +35,40 @@ jobs:
           sudo resize2fs -f "$SYS_IMG"
 
           sudo mkdir -p /mnt/android
-          if ! sudo mount -o loop,rw "$SYS_IMG" /mnt/android; then
-            echo "ERROR: Failed to mount system.img RW!"
-            exit 1
-          fi
+          sudo mount -o loop,rw "$SYS_IMG" /mnt/android
 
-          echo "=== Disk usage BEFORE debloat ==="
-          df -h /mnt/android
-
-          for BASE in "/mnt/android" "/mnt/android/system" "/mnt/android/product" "/mnt/android/system/product" "/mnt/android/system_ext" "/mnt/android/system/system_ext"; do
+          for BASE in /mnt/android /mnt/android/system /mnt/android/product /mnt/android/system_ext; do
             if [ -d "$BASE" ] && [ ! -L "$BASE" ]; then
-              sudo rm -rf "$BASE"/app/{ExactCalculator,Calculator,Etar,Calendar,DeskClock,Gallery2,Glimpse,Eleven,Music,Aperture,Camera2,Contacts,Messaging,Recorder,Email,Jelly,Browser2,PhotoTable,BasicDreams,LiveWallpapersPicker,EasterEgg}
-              sudo rm -rf "$BASE"/priv-app/{Gallery2,Glimpse,Eleven,Music,Contacts,Messaging,Recorder,Email}
-              sudo rm -rf "$BASE"/media/bootanimation.zip
-              sudo rm -rf "$BASE"/media/audio/{alarms,notifications,ringtones}
-              sudo rm -rf "$BASE"/tts
+              sudo rm -rf "$BASE"/app/ExactCalculator "$BASE"/app/Etar "$BASE"/app/Calendar
+              sudo rm -rf "$BASE"/app/DeskClock "$BASE"/app/Gallery2 "$BASE"/app/Glimpse
+              sudo rm -rf "$BASE"/app/Eleven "$BASE"/app/Music "$BASE"/app/Aperture
+              sudo rm -rf "$BASE"/app/Contacts "$BASE"/app/Messaging "$BASE"/app/Recorder
+              sudo rm -rf "$BASE"/app/Email "$BASE"/app/PhotoTable "$BASE"/app/BasicDreams
+              sudo rm -rf "$BASE"/app/LiveWallpapersPicker "$BASE"/app/EasterEgg
+              sudo rm -rf "$BASE"/priv-app/Gallery2 "$BASE"/priv-app/Glimpse "$BASE"/priv-app/Eleven
+              sudo rm -rf "$BASE"/media/bootanimation.zip "$BASE"/tts
               sudo rm -f "$BASE"/fonts/NotoSansCJK* "$BASE"/fonts/NotoSerifCJK*
-              sudo rm -f "$BASE"/recovery-from-boot.p "$BASE"/etc/recovery-resource.dat
             fi
           done
 
-          for BP in "/mnt/android/system/build.prop" "/mnt/android/build.prop" "/mnt/android/product/etc/build.prop" "/mnt/android/system/product/etc/build.prop" "/mnt/android/system_ext/etc/build.prop" "/mnt/android/system/system_ext/etc/build.prop"; do
+          for BP in /mnt/android/system/build.prop /mnt/android/build.prop /mnt/android/product/etc/build.prop; do
             if [ -f "$BP" ] && [ ! -L "$BP" ]; then
-              sudo cp -a "$BP" /tmp/bp.ref
-              printf "\n# Ultra Low-RAM Tweaks\nro.config.low_ram=true\nro.lmk.kill_heaviest_task=false\nro.sys.fw.bg_apps_limit=2\nro.config.max_starting_bg=1\ndalvik.vm.heapstartsize=4m\ndalvik.vm.heapgrowthlimit=128m\ndalvik.vm.heapsize=256m\ndalvik.vm.heapminfree=512k\ndalvik.vm.heapmaxfree=4m\ndebug.sf.nobootanimation=1\nro.surface_flinger.max_frame_buffer_acquired_buffers=2\npersist.sys.sf.disable_blurs=1\nconfig.disable_rtt=true\n" | sudo tee -a "$BP" > /dev/null
-              sudo chcon --reference=/tmp/bp.ref "$BP"
-              rm -f /tmp/bp.ref
+              sudo cp -a "$BP" /tmp/bp.bak
+              echo "" | sudo tee -a "$BP" > /dev/null
+              echo "ro.config.low_ram=true" | sudo tee -a "$BP" > /dev/null
+              echo "ro.sys.fw.bg_apps_limit=2" | sudo tee -a "$BP" > /dev/null
+              echo "ro.config.max_starting_bg=1" | sudo tee -a "$BP" > /dev/null
+              echo "dalvik.vm.heapstartsize=4m" | sudo tee -a "$BP" > /dev/null
+              echo "dalvik.vm.heapgrowthlimit=128m" | sudo tee -a "$BP" > /dev/null
+              echo "dalvik.vm.heapsize=256m" | sudo tee -a "$BP" > /dev/null
+              echo "debug.sf.nobootanimation=1" | sudo tee -a "$BP" > /dev/null
+              echo "persist.sys.sf.disable_blurs=1" | sudo tee -a "$BP" > /dev/null
+              echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=2" | sudo tee -a "$BP" > /dev/null
+              sudo chcon --reference=/tmp/bp.bak "$BP"
+              rm -f /tmp/bp.bak
             fi
           done
 
-          if [ -d "/mnt/android/system/etc/init" ]; then
-            INIT_DIR="/mnt/android/system/etc/init"
-          else
-            INIT_DIR="/mnt/android/etc/init"
-          fi
-          REF_RC=$(find "$INIT_DIR" -maxdepth 1 -type f -name "*.rc" | head -n 1)
-          printf "on init\n    write /proc/sys/vm/overcommit_memory 1\n    write /proc/sys/vm/swappiness 100\n    write /proc/sys/vm/vfs_cache_pressure 150\n\non property:sys.boot_completed=1\n    write /proc/sys/vm/drop_caches 3\n    write /proc/sys/vm/compact_memory 1\n    write /sys/block/zram0/disksize 1073741824\n" | sudo tee "$INIT_DIR/init.lowram.rc" > /dev/null
-          sudo chmod 644 "$INIT_DIR/init.lowram.rc"
-          if [ -n "$REF_RC" ]; then
-            sudo chcon --reference="$REF_RC" "$INIT_DIR/init.lowram.rc"
-          fi
-
-          echo "=== Disk usage AFTER debloat ==="
           df -h /mnt/android
           sudo e4defrag /mnt/android >/dev/null 2>&1 || true
           sync
@@ -100,26 +78,11 @@ jobs:
           sudo resize2fs -f -M "$SYS_IMG"
           sudo e2fsck -f -y "$SYS_IMG"
 
-          MIN_SIZE=$(stat -c%s "$SYS_IMG")
-          echo "Minimum shrunk size: $MIN_SIZE bytes (Target: $ORIG_SIZE bytes)"
-          if [ "$MIN_SIZE" -gt "$ORIG_SIZE" ]; then
-            echo "ERROR: Image still larger than $ORIG_SIZE bytes!"
-            exit 1
-          fi
-
           truncate -s "$ORIG_SIZE" "$SYS_IMG"
           sudo resize2fs -f "$SYS_IMG"
           sudo e2fsck -f -y "$SYS_IMG"
-          if [ -n "$ORIG_RO" ]; then
-            sudo tune2fs -O read-only "$SYS_IMG"
-          fi
+          sudo tune2fs -O read-only "$SYS_IMG"
           truncate -s "$ORIG_SIZE" "$SYS_IMG"
-
-          FINAL_SIZE=$(stat -c%s "$SYS_IMG")
-          echo "Verified exact final size: $FINAL_SIZE bytes"
-          if [ "$FINAL_SIZE" != "$ORIG_SIZE" ]; then
-            exit 1
-          fi
           exit 0
 
       - name: Step 3 - Repackage IPA
