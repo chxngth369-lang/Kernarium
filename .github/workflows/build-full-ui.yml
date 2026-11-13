@@ -3,11 +3,6 @@ name: Build Custom UI & Clean IPA
 on:
   push:
   workflow_dispatch:
-    inputs:
-      apk_url:
-        description: 'Direct APK URL (Optional)'
-        required: false
-        default: ''
 
 jobs:
   build-custom-ipa:
@@ -17,7 +12,7 @@ jobs:
         run: |
           set +e
           sudo apt-get update -y
-          sudo apt-get install -y e2fsprogs android-sdk-libsparse-utils kpartx fdisk unzip zip wget curl jq python3
+          sudo apt-get install -y e2fsprogs libplist-utils unzip zip wget curl jq python3
 
           mkdir -p work
           REL_JSON=$(curl -s https://api.github.com/repos/imxieyi/Kernarium/releases)
@@ -29,25 +24,43 @@ jobs:
           unzip -q Andarium.ipa -d work
           exit 0
 
-      - name: Step 2 - Safe In-Place Debloat & Rockstar UI Injection (Exact 1048506368 Bytes)
+      - name: Step 2 - Unlock Info.plist (Enable Files Folder & Fix Greyed-Out APK)
+        run: |
+          set +e
+          APP_DIR=$(find work/Payload -maxdepth 1 -name "*.app" | head -n 1)
+          PLIST="$APP_DIR/Info.plist"
+          # แปลง Info.plist เป็น XML เพื่อเพิ่มสิทธิ์เปิดโฟลเดอร์ในแอป Files และปลดล็อกนามสกุล .apk
+          plistutil -i "$PLIST" -o "$PLIST.xml" -f xml 2>/dev/null || cp "$PLIST" "$PLIST.xml"
+          python3 -c '
+          import plistlib, sys
+          p = sys.argv[1]
+          with open(p, "rb") as f:
+              data = plistlib.load(f)
+          data["UIFileSharingEnabled"] = True
+          data["LSSupportsOpeningDocumentsInPlace"] = True
+          data["UISupportsDocumentBrowser"] = True
+          data["UTImportedTypeDeclarations"] = [{
+              "UTTypeIdentifier": "com.android.package-archive",
+              "UTTypeDescription": "Android Package",
+              "UTTypeConformsTo": ["public.data", "public.archive", "public.item", "public.content"],
+              "UTTypeTagSpecification": {
+                  "public.filename-extension": ["apk", "APK"],
+                  "public.mime-type": ["application/vnd.android.package-archive", "application/octet-stream"]
+              }
+          }]
+          with open(p, "wb") as f:
+              plistlib.dump(data, f)
+          print("Successfully unlocked Info.plist for .apk selection and Files app folder!")
+          ' "$PLIST"
+          exit 0
+
+      - name: Step 3 - Safe In-Place Debloat & Rockstar UI (Exact 1048506368 Bytes)
         run: |
           set +e
           SYS_IMG=$(find work -name "system.img" | head -n 1)
-          if [ -z "$SYS_IMG" ]; then
-            echo "Downloading lineage tar.gz..."
-            REL_JSON=$(curl -s https://api.github.com/repos/imxieyi/Kernarium/releases)
-            TAR_URL=$(echo "$REL_JSON" | jq -r '.[0].assets[] | select(.name | contains("lineage")) | .browser_download_url' | head -n 1)
-            wget -q -O lineage.tar.gz "$TAR_URL" || curl -L -o lineage.tar.gz "$TAR_URL"
-            APP_DIR=$(find work/Payload -maxdepth 1 -name "*.app" | head -n 1)
-            tar -xzf lineage.tar.gz -C "$APP_DIR"
-            SYS_IMG=$(find work -name "system.img" | head -n 1)
-          fi
-
           ORIG_SIZE=$(stat -c%s "$SYS_IMG")
           ORIG_KB=$((ORIG_SIZE / 1024))
-          echo "Target system.img: $SYS_IMG | Original Size: $ORIG_SIZE bytes ($ORIG_KB KiB)"
 
-          # สร้างไฟล์ HTML หน้า UI สไตล์ Rockstar Launcher ด้วย Python (ไม่มีวันติด Base64 error หรือ YAML syntax error!)
           python3 -c '
           html = """<!DOCTYPE html>
           <html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no"><title>Game Launcher</title>
@@ -97,7 +110,6 @@ jobs:
 
           printf "on property:sys.boot_completed=1\n    exec - root root -- /system/bin/sh -c \"settings put global window_animation_scale 0 && settings put global transition_animation_scale 0 && settings put global animator_duration_scale 0 && am start -a android.intent.action.VIEW -d file:///system/etc/custom_launcher/index.html\"\n" > /tmp/autostart_ui.rc
 
-          # ขยายพื้นที่ชั่วคราว 800MB เพื่อปลดล็อก shared_blocks แล้วหดกลับเท่าเดิมเป๊ะตอนจบ
           dd if=/dev/zero bs=1M count=800 >> "$SYS_IMG"
           sudo e2fsck -f -y "$SYS_IMG"
           sudo resize2fs -f "$SYS_IMG"
@@ -107,14 +119,7 @@ jobs:
 
           sudo mkdir -p /mnt/android
           if sudo mount -o loop,rw "$SYS_IMG" /mnt/android; then
-            echo "Mounted RW successfully!"
-            if [ -d "/mnt/android/system/app" ]; then
-              SR="/mnt/android/system"
-            else
-              SR="/mnt/android"
-            fi
-
-            # ลบแอปขยะ ไฟล์เสียง และฟอนต์ CJK ขนาดใหญ่ (คืนพื้นที่ >400MB เพื่อหดกลับขนาดเดิมได้สบายๆ)
+            if [ -d "/mnt/android/system/app" ]; then SR="/mnt/android/system"; else SR="/mnt/android"; fi
             sudo rm -rf "$SR"/product/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email,LatinIME}
             sudo rm -rf "$SR"/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email,LiveWallpapersPicker,PhotoTable,BasicDreams,BookmarkProvider,BuiltInPrintService,EasterEgg,PrintSpooler,SimAppDialog,Stk,WallpaperBackup}
             sudo rm -rf "$SR"/media/bootanimation.zip "$SR"/product/media/bootanimation.zip
@@ -139,7 +144,6 @@ jobs:
             sync
             sudo umount /mnt/android
 
-            # หดพาร์ทิชันข้างในให้เล็กกว่าขนาดเดิม แล้วขยายพอดีเป๊ะที่ $ORIG_KB KiB (1048506368 bytes)
             sudo e2fsck -f -y "$SYS_IMG"
             sudo resize2fs -f -M "$SYS_IMG"
             sudo e2fsck -f -y "$SYS_IMG"
@@ -147,18 +151,15 @@ jobs:
             sudo e2fsck -f -y "$SYS_IMG"
           fi
 
-          # ล็อกขนาดไฟล์ให้เท่ากับ 1048506368 bytes เป๊ะๆ ทุกไบต์!
           truncate -s "$ORIG_SIZE" "$SYS_IMG"
-          FINAL_SIZE=$(stat -c%s "$SYS_IMG")
-          echo "Final exact size: $FINAL_SIZE bytes (Must match: $ORIG_SIZE bytes)"
           exit 0
 
-      - name: Step 3 - Repackage IPA (Preserve Symlinks)
+      - name: Step 4 - Repackage IPA
         run: |
           cd work
           zip -q -r -y ../CustomUI-Game.ipa Payload
 
-      - name: Step 4 - Upload Artifact
+      - name: Step 5 - Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: CustomUI-Game-IPA
