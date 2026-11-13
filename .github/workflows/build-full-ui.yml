@@ -12,13 +12,19 @@ jobs:
         run: |
           set +e
           sudo apt-get update -y
-          sudo apt-get install -y e2fsprogs unzip zip wget curl
+          sudo apt-get install -y e2fsprogs unzip zip wget curl jq
 
           mkdir -p work
-          U1="https://github.com/imxieyi/Kernarium/releases/latest/download/Andarium.ipa"
-          U2="https://github.com/imxieyi/Kernarium/releases/download/1.0b9-beta/Andarium.ipa"
-          curl -fL -o Andarium.ipa "$U1" || curl -fL -o Andarium.ipa "$U2"
+          API="https://api.github.com/repos/imxieyi/Kernarium/releases"
+          Q='[.[] | .assets[]? | select(.name | endswith(".ipa")) | .browser_download_url][0]'
+          IPA_URL=$(curl -sL "$API" | jq -r "$Q")
+          echo "Downloading: $IPA_URL"
+          wget -q -O Andarium.ipa "$IPA_URL" || curl -fL -o Andarium.ipa "$IPA_URL"
           unzip -q -o Andarium.ipa -d work
+          if [ ! -d "work/Payload" ]; then
+            echo "Download or unzip failed"
+            exit 1
+          fi
           exit 0
 
       - name: Step 2 - Optimize System Image for Low RAM
@@ -37,7 +43,10 @@ jobs:
           sudo mkdir -p /mnt/android
           sudo mount -o loop,rw "$SYS_IMG" /mnt/android
 
-          for BASE in /mnt/android /mnt/android/system /mnt/android/product /mnt/android/system_ext; do
+          DIRS="/mnt/android /mnt/android/system /mnt/android/product"
+          DIRS="$DIRS /mnt/android/system/product /mnt/android/system_ext"
+          DIRS="$DIRS /mnt/android/system/system_ext"
+          for BASE in $DIRS; do
             if [ -d "$BASE" ] && [ ! -L "$BASE" ]; then
               sudo rm -rf "$BASE"/app/ExactCalculator "$BASE"/app/Etar "$BASE"/app/Calendar
               sudo rm -rf "$BASE"/app/DeskClock "$BASE"/app/Gallery2 "$BASE"/app/Glimpse
@@ -45,13 +54,17 @@ jobs:
               sudo rm -rf "$BASE"/app/Contacts "$BASE"/app/Messaging "$BASE"/app/Recorder
               sudo rm -rf "$BASE"/app/Email "$BASE"/app/PhotoTable "$BASE"/app/BasicDreams
               sudo rm -rf "$BASE"/app/LiveWallpapersPicker "$BASE"/app/EasterEgg
-              sudo rm -rf "$BASE"/priv-app/Gallery2 "$BASE"/priv-app/Glimpse "$BASE"/priv-app/Eleven
+              sudo rm -rf "$BASE"/priv-app/Gallery2 "$BASE"/priv-app/Glimpse
+              sudo rm -rf "$BASE"/priv-app/Eleven "$BASE"/priv-app/Music
               sudo rm -rf "$BASE"/media/bootanimation.zip "$BASE"/tts
               sudo rm -f "$BASE"/fonts/NotoSansCJK* "$BASE"/fonts/NotoSerifCJK*
             fi
           done
 
-          for BP in /mnt/android/system/build.prop /mnt/android/build.prop /mnt/android/product/etc/build.prop; do
+          BPS="/mnt/android/system/build.prop /mnt/android/build.prop"
+          BPS="$BPS /mnt/android/product/etc/build.prop"
+          BPS="$BPS /mnt/android/system/product/etc/build.prop"
+          for BP in $BPS; do
             if [ -f "$BP" ] && [ ! -L "$BP" ]; then
               sudo cp -a "$BP" /tmp/bp.bak
               echo "" | sudo tee -a "$BP" > /dev/null
@@ -77,6 +90,9 @@ jobs:
           sudo e2fsck -f -y "$SYS_IMG"
           sudo resize2fs -f -M "$SYS_IMG"
           sudo e2fsck -f -y "$SYS_IMG"
+
+          MIN_SIZE=$(stat -c%s "$SYS_IMG")
+          echo "Shrunk size: $MIN_SIZE / Target: $ORIG_SIZE"
 
           truncate -s "$ORIG_SIZE" "$SYS_IMG"
           sudo resize2fs -f "$SYS_IMG"
