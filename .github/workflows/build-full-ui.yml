@@ -8,11 +8,11 @@ jobs:
   build-custom-ipa:
     runs-on: ubuntu-latest
     steps:
-      - name: Step 1 - Download Official IPA
+      - name: Step 1 - Download Official IPA (Keep Original Info.plist 100% Intact)
         run: |
           set +e
           sudo apt-get update -y
-          sudo apt-get install -y e2fsprogs libplist-utils unzip zip wget curl jq python3
+          sudo apt-get install -y e2fsprogs unzip zip wget curl jq python3
 
           mkdir -p work
           REL_JSON=$(curl -s https://api.github.com/repos/imxieyi/Kernarium/releases)
@@ -24,42 +24,16 @@ jobs:
           unzip -q Andarium.ipa -d work
           exit 0
 
-      - name: Step 2 - Unlock Info.plist (Enable Files Folder & Fix Greyed-Out APK)
-        run: |
-          set +e
-          APP_DIR=$(find work/Payload -maxdepth 1 -name "*.app" | head -n 1)
-          PLIST="$APP_DIR/Info.plist"
-          # แปลง Info.plist เป็น XML เพื่อเพิ่มสิทธิ์เปิดโฟลเดอร์ในแอป Files และปลดล็อกนามสกุล .apk
-          plistutil -i "$PLIST" -o "$PLIST.xml" -f xml 2>/dev/null || cp "$PLIST" "$PLIST.xml"
-          python3 -c '
-          import plistlib, sys
-          p = sys.argv[1]
-          with open(p, "rb") as f:
-              data = plistlib.load(f)
-          data["UIFileSharingEnabled"] = True
-          data["LSSupportsOpeningDocumentsInPlace"] = True
-          data["UISupportsDocumentBrowser"] = True
-          data["UTImportedTypeDeclarations"] = [{
-              "UTTypeIdentifier": "com.android.package-archive",
-              "UTTypeDescription": "Android Package",
-              "UTTypeConformsTo": ["public.data", "public.archive", "public.item", "public.content"],
-              "UTTypeTagSpecification": {
-                  "public.filename-extension": ["apk", "APK"],
-                  "public.mime-type": ["application/vnd.android.package-archive", "application/octet-stream"]
-              }
-          }]
-          with open(p, "wb") as f:
-              plistlib.dump(data, f)
-          print("Successfully unlocked Info.plist for .apk selection and Files app folder!")
-          ' "$PLIST"
-          exit 0
-
-      - name: Step 3 - Safe In-Place Debloat & Rockstar UI (Exact 1048506368 Bytes)
+      - name: Step 2 - Safe Debloat Without Truncating Any System Blocks
         run: |
           set +e
           SYS_IMG=$(find work -name "system.img" | head -n 1)
           ORIG_SIZE=$(stat -c%s "$SYS_IMG")
           ORIG_KB=$((ORIG_SIZE / 1024))
+          echo "Original size: $ORIG_SIZE bytes ($ORIG_KB KiB)"
+
+          # เก็บไฟล์ต้นฉบับสำรองไว้เผื่อกรณีหดขนาดไม่ลง จะได้ไม่ตัดไฟล์แหว่งเด็ดขาด
+          cp "$SYS_IMG" "$SYS_IMG.backup"
 
           python3 -c '
           html = """<!DOCTYPE html>
@@ -108,9 +82,8 @@ jobs:
           open("/tmp/index.html", "w").write(html.strip())
           '
 
-          printf "on property:sys.boot_completed=1\n    exec - root root -- /system/bin/sh -c \"settings put global window_animation_scale 0 && settings put global transition_animation_scale 0 && settings put global animator_duration_scale 0 && am start -a android.intent.action.VIEW -d file:///system/etc/custom_launcher/index.html\"\n" > /tmp/autostart_ui.rc
-
-          dd if=/dev/zero bs=1M count=800 >> "$SYS_IMG"
+          # ขยายชั่วคราวแค่ 350MB เพื่อไม่ให้บล็อกกระเด็นไปไกลเกิน 1GB
+          dd if=/dev/zero bs=1M count=350 >> "$SYS_IMG"
           sudo e2fsck -f -y "$SYS_IMG"
           sudo resize2fs -f "$SYS_IMG"
           sudo e2fsck -E unshare_blocks -f -y "$SYS_IMG"
@@ -120,46 +93,59 @@ jobs:
           sudo mkdir -p /mnt/android
           if sudo mount -o loop,rw "$SYS_IMG" /mnt/android; then
             if [ -d "/mnt/android/system/app" ]; then SR="/mnt/android/system"; else SR="/mnt/android"; fi
-            sudo rm -rf "$SR"/product/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email,LatinIME}
-            sudo rm -rf "$SR"/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email,LiveWallpapersPicker,PhotoTable,BasicDreams,BookmarkProvider,BuiltInPrintService,EasterEgg,PrintSpooler,SimAppDialog,Stk,WallpaperBackup}
+
+            # ลบเฉพาะแอปภายนอกและฟอนต์ CJK ขนาดใหญ่ (ห้ามลบเซอร์วิสระบบหรือตัวติดตั้งแอปเด็ดขาด!)
+            sudo rm -rf "$SR"/product/app/{Aperture,Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email}
+            sudo rm -rf "$SR"/app/{Etar,Calendar,DeskClock,ExactCalculator,Contacts,Messaging,Eleven,Glimpse,Gallery2,Recorder,Email,PhotoTable,BasicDreams,EasterEgg}
             sudo rm -rf "$SR"/media/bootanimation.zip "$SR"/product/media/bootanimation.zip
-            sudo rm -rf "$SR"/media/audio/{alarms,notifications,ringtones} "$SR"/product/media/audio/{alarms,notifications,ringtones}
             sudo rm -rf "$SR"/tts "$SR"/product/tts
-            sudo rm -f "$SR"/fonts/NotoSansCJK* "$SR"/fonts/NotoSerifCJK*
+            sudo rm -f "$SR"/fonts/NotoSansCJK* "$SR"/fonts/NotoSerifCJK* "$SR"/product/fonts/NotoSansCJK*
+            sudo rm -f "$SR"/recovery-from-boot.p "$SR"/etc/recovery-resource.dat
 
             if [ -f "$SR/build.prop" ]; then
               sudo cp -a "$SR/build.prop" /tmp/bp.bak
-              printf "\ndebug.sf.nobootanimation=1\nro.surface_flinger.max_frame_buffer_acquired_buffers=3\n" | sudo tee -a "$SR/build.prop" > /dev/null
+              printf "\ndebug.sf.nobootanimation=1\n" | sudo tee -a "$SR/build.prop" > /dev/null
               sudo chcon --reference=/tmp/bp.bak "$SR/build.prop"
             fi
 
-            sudo mkdir -p "$SR/etc/custom_launcher" "$SR/etc/init"
+            sudo mkdir -p "$SR/etc/custom_launcher"
             sudo cp /tmp/index.html "$SR/etc/custom_launcher/index.html"
-            sudo cp /tmp/autostart_ui.rc "$SR/etc/init/autostart_ui.rc"
             sudo chmod 755 "$SR/etc/custom_launcher"
-            sudo chmod 644 "$SR/etc/custom_launcher/index.html" "$SR/etc/init/autostart_ui.rc"
+            sudo chmod 644 "$SR/etc/custom_launcher/index.html"
             sudo chcon -R --reference="$SR/etc" "$SR/etc/custom_launcher"
-            sudo chcon --reference="$SR/etc/init" "$SR/etc/init/autostart_ui.rc"
 
+            # จัดเรียงบล็อกข้อมูลทั้งหมดให้ชิดต้นพาร์ทิชันก่อนหดขนาด
+            sudo e4defrag /mnt/android >/dev/null 2>&1 || true
+            df -h /mnt/android
             sync
             sudo umount /mnt/android
 
             sudo e2fsck -f -y "$SYS_IMG"
             sudo resize2fs -f -M "$SYS_IMG"
             sudo e2fsck -f -y "$SYS_IMG"
-            sudo resize2fs -f "$SYS_IMG" "${ORIG_KB}K"
-            sudo e2fsck -f -y "$SYS_IMG"
-          fi
 
-          truncate -s "$ORIG_SIZE" "$SYS_IMG"
+            # เช็กว่าหดลงมาที่ขนาดเดิม (1023932K) ได้โดยไม่เสียบล็อกข้อมูลหรือไม่
+            if sudo resize2fs -f "$SYS_IMG" "${ORIG_KB}K"; then
+              echo "Successfully resized cleanly to exact original block count ($ORIG_KB KiB) with ZERO data loss!"
+              sudo e2fsck -f -y "$SYS_IMG"
+              sudo tune2fs -O read-only "$SYS_IMG"
+              truncate -s "$ORIG_SIZE" "$SYS_IMG"
+              rm -f "$SYS_IMG.backup"
+            else
+              echo "Warning: Shrinking below $ORIG_KB KiB failed, restoring intact backup..."
+              mv "$SYS_IMG.backup" "$SYS_IMG"
+            fi
+          else
+            mv "$SYS_IMG.backup" "$SYS_IMG"
+          fi
           exit 0
 
-      - name: Step 4 - Repackage IPA
+      - name: Step 3 - Repackage IPA (Preserve Symlinks)
         run: |
           cd work
           zip -q -r -y ../CustomUI-Game.ipa Payload
 
-      - name: Step 5 - Upload Artifact
+      - name: Step 4 - Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: CustomUI-Game-IPA
