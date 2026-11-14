@@ -1,113 +1,40 @@
-name: Build Low RAM IPA
+name: Inspect Layout and Source Config
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-ipa:
+  inspect-source:
     runs-on: ubuntu-latest
     steps:
-      - name: Step 1 - Download IPA
+      - name: Step 1 - Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Step 2 - Check Build Scripts and Layout Files
+        run: |
+          echo "=== Project Root Files ==="
+          ls -la
+          echo "=== Tools and Scripts ==="
+          find . -maxdepth 4 -name "*.py" -o -name "CMakeLists.txt" -o -name "*.json" -o -name "*.plist"
+          REL_PY=$(find . -name "install-release.py" | head -n 1)
+          if [ -n "$REL_PY" ]; then
+            echo "=== Found install-release.py ==="
+            cat "$REL_PY"
+          fi
+
+      - name: Step 3 - Check Bundle Layout Metadata inside Official IPA
         run: |
           set +e
           sudo apt-get update -y
-          sudo apt-get install -y e2fsprogs unzip zip wget curl jq
-
-          mkdir -p work
+          sudo apt-get install -y unzip curl jq
           API="https://api.github.com/repos/imxieyi/Kernarium/releases"
           Q='[.[] | .assets[]? | select(.name | endswith(".ipa")) | .browser_download_url][0]'
           IPA_URL=$(curl -sL "$API" | jq -r "$Q")
-          echo "Downloading: $IPA_URL"
-          wget -q -O Andarium.ipa "$IPA_URL" || curl -fL -o Andarium.ipa "$IPA_URL"
+          curl -fL -o Andarium.ipa "$IPA_URL"
+          mkdir -p work
           unzip -q -o Andarium.ipa -d work
-          if [ ! -d "work/Payload" ]; then
-            echo "Download or unzip failed"
-            exit 1
-          fi
+          echo "=== Files inside App Bundle ==="
+          find work/Payload -maxdepth 3
+          grep -rn "1048506368" work/Payload/ || true
           exit 0
-
-      - name: Step 2 - Optimize System Image for Low RAM
-        run: |
-          set +e
-          SYS_IMG=$(find work -name "system.img" | head -n 1)
-          ORIG_SIZE=$(stat -c%s "$SYS_IMG")
-
-          dd if=/dev/zero bs=1M count=500 >> "$SYS_IMG"
-          sudo e2fsck -f -y "$SYS_IMG"
-          sudo resize2fs -f "$SYS_IMG"
-          sudo e2fsck -E unshare_blocks -f -y "$SYS_IMG"
-          sudo tune2fs -O ^read-only -m 0 "$SYS_IMG"
-          sudo resize2fs -f "$SYS_IMG"
-
-          sudo mkdir -p /mnt/android
-          sudo mount -o loop,rw "$SYS_IMG" /mnt/android
-
-          DIRS="/mnt/android /mnt/android/system /mnt/android/product"
-          DIRS="$DIRS /mnt/android/system/product /mnt/android/system_ext"
-          DIRS="$DIRS /mnt/android/system/system_ext"
-          for BASE in $DIRS; do
-            if [ -d "$BASE" ] && [ ! -L "$BASE" ]; then
-              sudo rm -rf "$BASE"/app/ExactCalculator "$BASE"/app/Etar "$BASE"/app/Calendar
-              sudo rm -rf "$BASE"/app/DeskClock "$BASE"/app/Gallery2 "$BASE"/app/Glimpse
-              sudo rm -rf "$BASE"/app/Eleven "$BASE"/app/Music "$BASE"/app/Aperture
-              sudo rm -rf "$BASE"/app/Contacts "$BASE"/app/Messaging "$BASE"/app/Recorder
-              sudo rm -rf "$BASE"/app/Email "$BASE"/app/PhotoTable "$BASE"/app/BasicDreams
-              sudo rm -rf "$BASE"/app/LiveWallpapersPicker "$BASE"/app/EasterEgg
-              sudo rm -rf "$BASE"/priv-app/Gallery2 "$BASE"/priv-app/Glimpse
-              sudo rm -rf "$BASE"/priv-app/Eleven "$BASE"/priv-app/Music
-              sudo rm -rf "$BASE"/media/bootanimation.zip "$BASE"/tts
-              sudo rm -f "$BASE"/fonts/NotoSansCJK* "$BASE"/fonts/NotoSerifCJK*
-            fi
-          done
-
-          BPS="/mnt/android/system/build.prop /mnt/android/build.prop"
-          BPS="$BPS /mnt/android/product/etc/build.prop"
-          BPS="$BPS /mnt/android/system/product/etc/build.prop"
-          for BP in $BPS; do
-            if [ -f "$BP" ] && [ ! -L "$BP" ]; then
-              sudo cp -a "$BP" /tmp/bp.bak
-              echo "" | sudo tee -a "$BP" > /dev/null
-              echo "ro.config.low_ram=true" | sudo tee -a "$BP" > /dev/null
-              echo "ro.sys.fw.bg_apps_limit=2" | sudo tee -a "$BP" > /dev/null
-              echo "ro.config.max_starting_bg=1" | sudo tee -a "$BP" > /dev/null
-              echo "dalvik.vm.heapstartsize=4m" | sudo tee -a "$BP" > /dev/null
-              echo "dalvik.vm.heapgrowthlimit=128m" | sudo tee -a "$BP" > /dev/null
-              echo "dalvik.vm.heapsize=256m" | sudo tee -a "$BP" > /dev/null
-              echo "debug.sf.nobootanimation=1" | sudo tee -a "$BP" > /dev/null
-              echo "persist.sys.sf.disable_blurs=1" | sudo tee -a "$BP" > /dev/null
-              echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=2" | sudo tee -a "$BP" > /dev/null
-              sudo chcon --reference=/tmp/bp.bak "$BP"
-              rm -f /tmp/bp.bak
-            fi
-          done
-
-          df -h /mnt/android
-          sudo e4defrag /mnt/android >/dev/null 2>&1 || true
-          sync
-          sudo umount /mnt/android
-
-          sudo e2fsck -f -y "$SYS_IMG"
-          sudo resize2fs -f -M "$SYS_IMG"
-          sudo e2fsck -f -y "$SYS_IMG"
-
-          MIN_SIZE=$(stat -c%s "$SYS_IMG")
-          echo "Shrunk size: $MIN_SIZE / Target: $ORIG_SIZE"
-
-          truncate -s "$ORIG_SIZE" "$SYS_IMG"
-          sudo resize2fs -f "$SYS_IMG"
-          sudo e2fsck -f -y "$SYS_IMG"
-          sudo tune2fs -O read-only "$SYS_IMG"
-          truncate -s "$ORIG_SIZE" "$SYS_IMG"
-          exit 0
-
-      - name: Step 3 - Repackage IPA
-        run: |
-          cd work
-          zip -q -r -y ../UltraLowRAM-Andarium.ipa Payload
-
-      - name: Step 4 - Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: UltraLowRAM-Andarium-IPA
-          path: UltraLowRAM-Andarium.ipa
