@@ -1,40 +1,138 @@
-name: Inspect Layout and Source Config
+name: Build Expanded Low RAM IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  inspect-source:
+  build-expanded:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Step 2 - Check Build Scripts and Layout Files
-        run: |
-          echo "=== Project Root Files ==="
-          ls -la
-          echo "=== Tools and Scripts ==="
-          find . -maxdepth 4 -name "*.py" -o -name "CMakeLists.txt" -o -name "*.json" -o -name "*.plist"
-          REL_PY=$(find . -name "install-release.py" | head -n 1)
-          if [ -n "$REL_PY" ]; then
-            echo "=== Found install-release.py ==="
-            cat "$REL_PY"
-          fi
-
-      - name: Step 3 - Check Bundle Layout Metadata inside Official IPA
+      - name: Step 2 - Download and Unpack Official IPA
         run: |
           set +e
           sudo apt-get update -y
-          sudo apt-get install -y unzip curl jq
+          sudo apt-get install -y e2fsprogs unzip zip wget curl jq python3
+
+          mkdir -p work report
+          find . -maxdepth 4 -name "*stage-system*" -exec cp {} report/ \;
           API="https://api.github.com/repos/imxieyi/Kernarium/releases"
           Q='[.[] | .assets[]? | select(.name | endswith(".ipa")) | .browser_download_url][0]'
           IPA_URL=$(curl -sL "$API" | jq -r "$Q")
-          curl -fL -o Andarium.ipa "$IPA_URL"
-          mkdir -p work
+          wget -q -O Andarium.ipa "$IPA_URL" || curl -fL -o Andarium.ipa "$IPA_URL"
           unzip -q -o Andarium.ipa -d work
-          echo "=== Files inside App Bundle ==="
-          find work/Payload -maxdepth 3
-          grep -rn "1048506368" work/Payload/ || true
+          find work/Payload -type f > report/bundle-files.txt
+          find work/Payload -name "*.json" -exec cp {} report/ \;
           exit 0
+
+      - name: Step 3 - Expand Image, Optimize RAM, and Update Layout JSON
+        run: |
+          set +e
+          SYS_IMG=$(find work -name "system.img" | head -n 1)
+          ORIG_SIZE=$(stat -c%s "$SYS_IMG")
+          ORIG_SHA=$(sha256sum "$SYS_IMG" | awk '{print $1}')
+          ADD_BYTES=$((300 * 1048576))
+          NEW_SIZE=$((ORIG_SIZE + ADD_BYTES))
+
+          dd if=/dev/zero bs=1M count=300 >> "$SYS_IMG"
+          truncate -s "$NEW_SIZE" "$SYS_IMG"
+          sudo e2fsck -f -y "$SYS_IMG"
+          sudo resize2fs -f "$SYS_IMG"
+          sudo e2fsck -E unshare_blocks -f -y "$SYS_IMG"
+          sudo tune2fs -O ^read-only -m 0 "$SYS_IMG"
+          sudo resize2fs -f "$SYS_IMG"
+
+          sudo mkdir -p /mnt/android
+          sudo mount -o loop,rw "$SYS_IMG" /mnt/android
+
+          DIRS="/mnt/android /mnt/android/system /mnt/android/product"
+          DIRS="$DIRS /mnt/android/system/product /mnt/android/system_ext"
+          DIRS="$DIRS /mnt/android/system/system_ext"
+          for BASE in $DIRS; do
+            if [ -d "$BASE" ] && [ ! -L "$BASE" ]; then
+              sudo rm -rf "$BASE"/app/ExactCalculator "$BASE"/app/Etar "$BASE"/app/Calendar
+              sudo rm -rf "$BASE"/app/DeskClock "$BASE"/app/Gallery2 "$BASE"/app/Glimpse
+              sudo rm -rf "$BASE"/app/Eleven "$BASE"/app/Music "$BASE"/app/Aperture
+              sudo rm -rf "$BASE"/app/Contacts "$BASE"/app/Messaging "$BASE"/app/Recorder
+              sudo rm -rf "$BASE"/app/Email "$BASE"/app/PhotoTable "$BASE"/app/BasicDreams
+              sudo rm -rf "$BASE"/app/LiveWallpapersPicker "$BASE"/app/EasterEgg
+              sudo rm -rf "$BASE"/priv-app/Gallery2 "$BASE"/priv-app/Glimpse
+              sudo rm -rf "$BASE"/priv-app/Eleven "$BASE"/priv-app/Music
+              sudo rm -rf "$BASE"/media/bootanimation.zip "$BASE"/tts
+              sudo rm -f "$BASE"/fonts/NotoSansCJK* "$BASE"/fonts/NotoSerifCJK*
+            fi
+          done
+
+          BPS="/mnt/android/system/build.prop /mnt/android/build.prop"
+          BPS="$BPS /mnt/android/product/etc/build.prop"
+          BPS="$BPS /mnt/android/system/product/etc/build.prop"
+          for BP in $BPS; do
+            if [ -f "$BP" ] && [ ! -L "$BP" ]; then
+              sudo cp -a "$BP" /tmp/bp.bak
+              echo "" | sudo tee -a "$BP" > /dev/null
+              echo "ro.sys.fw.bg_apps_limit=2" | sudo tee -a "$BP" > /dev/null
+              echo "ro.config.max_starting_bg=1" | sudo tee -a "$BP" > /dev/null
+              echo "dalvik.vm.heapstartsize=4m" | sudo tee -a "$BP" > /dev/null
+              echo "dalvik.vm.heapgrowthlimit=128m" | sudo tee -a "$BP" > /dev/null
+              echo "dalvik.vm.heapsize=256m" | sudo tee -a "$BP" > /dev/null
+              echo "debug.sf.nobootanimation=1" | sudo tee -a "$BP" > /dev/null
+              echo "persist.sys.sf.disable_blurs=1" | sudo tee -a "$BP" > /dev/null
+              echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=2" | sudo tee -a "$BP" > /dev/null
+              sudo chcon --reference=/tmp/bp.bak "$BP"
+              rm -f /tmp/bp.bak
+            fi
+          done
+
+          df -h /mnt/android > report/df-after.txt
+          sync
+          sudo umount /mnt/android
+
+          sudo e2fsck -f -y "$SYS_IMG"
+          sudo tune2fs -O read-only "$SYS_IMG"
+          truncate -s "$NEW_SIZE" "$SYS_IMG"
+          NEW_SHA=$(sha256sum "$SYS_IMG" | awk '{print $1}')
+
+          rm -f /tmp/fix.py
+          echo 'import glob, json, os, sys' >> /tmp/fix.py
+          echo 'orig, add = int(sys.argv), int(sys.argv)' >> /tmp/fix.py
+          echo 'osha, nsha = sys.argv.lower(), sys.argv.lower()' >> /tmp/fix.py
+          echo 's512, b4k = orig // 512, orig // 4096' >> /tmp/fix.py
+          echo 'def fix(v):' >> /tmp/fix.py
+          echo '  if isinstance(v, bool): return v' >> /tmp/fix.py
+          echo '  if isinstance(v, int):' >> /tmp/fix.py
+          echo '    if orig <= v <= orig + 16777216: return v + add' >> /tmp/fix.py
+          echo '    if s512 - 100 <= v <= s512 + 10000: return v + (add // 512)' >> /tmp/fix.py
+          echo '    if b4k - 20 <= v <= b4k + 2000: return v + (add // 4096)' >> /tmp/fix.py
+          echo '    return v' >> /tmp/fix.py
+          echo '  if isinstance(v, str): return nsha if v.lower() == osha else v' >> /tmp/fix.py
+          echo '  if isinstance(v, dict): return {k: fix(x) for k, x in v.items()}' >> /tmp/fix.py
+          echo '  if isinstance(v, list): return [fix(x) for x in v]' >> /tmp/fix.py
+          echo '  return v' >> /tmp/fix.py
+          echo 'for p in glob.glob("work/Payload/**/*.json", recursive=True):' >> /tmp/fix.py
+          echo '  try:' >> /tmp/fix.py
+          echo '    d = fix(json.load(open(p)))' >> /tmp/fix.py
+          echo '    json.dump(d, open(p, "w"), indent=2)' >> /tmp/fix.py
+          echo '    json.dump(d, open("report/new-" + os.path.basename(p), "w"), indent=2)' >> /tmp/fix.py
+          echo '  except Exception as e: print(p, e)' >> /tmp/fix.py
+          python3 /tmp/fix.py "$ORIG_SIZE" "$ADD_BYTES" "$ORIG_SHA" "$NEW_SHA"
+          exit 0
+
+      - name: Step 4 - Repackage IPA
+        run: |
+          cd work
+          zip -q -r -y ../Expanded-Andarium.ipa Payload
+
+      - name: Step 5 - Upload Modified IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Expanded-LowRAM-IPA
+          path: Expanded-Andarium.ipa
+
+      - name: Step 6 - Upload Layout Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Layout-Report
+          path: report/
