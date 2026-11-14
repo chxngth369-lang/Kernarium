@@ -1,138 +1,287 @@
-name: Build Expanded Low RAM IPA
+name: Build Low RAM GPT System IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-expanded:
+  build-lowram-gpt:
     runs-on: ubuntu-latest
     steps:
-      - name: Step 1 - Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Step 2 - Download and Unpack Official IPA
+      - name: Step 1 - Download Tools and Unpack Official IPA
         run: |
           set +e
           sudo apt-get update -y
-          sudo apt-get install -y e2fsprogs unzip zip wget curl jq python3
+          sudo apt-get install -y e2fsprogs erofs-utils gdisk attr util-linux unzip zip wget curl jq
+          sudo modprobe erofs || true
 
           mkdir -p work report
-          find . -maxdepth 4 -name "*stage-system*" -exec cp {} report/ \;
           API="https://api.github.com/repos/imxieyi/Kernarium/releases"
           Q='[.[] | .assets[]? | select(.name | endswith(".ipa")) | .browser_download_url][0]'
           IPA_URL=$(curl -sL "$API" | jq -r "$Q")
+          echo "Downloading IPA: $IPA_URL"
           wget -q -O Andarium.ipa "$IPA_URL" || curl -fL -o Andarium.ipa "$IPA_URL"
           unzip -q -o Andarium.ipa -d work
-          find work/Payload -type f > report/bundle-files.txt
-          find work/Payload -name "*.json" -exec cp {} report/ \;
+          if [ ! -d "work/Payload/Andarium.app/andarium-system" ]; then
+            echo "ERROR: andarium-system folder missing"
+            exit 1
+          fi
           exit 0
 
-      - name: Step 3 - Expand Image, Optimize RAM, and Update Layout JSON
+      - name: Step 2 - Rebuild GPT Partitions with Low RAM Config
+        shell: python3 {0}
         run: |
-          set +e
-          SYS_IMG=$(find work -name "system.img" | head -n 1)
-          ORIG_SIZE=$(stat -c%s "$SYS_IMG")
-          ORIG_SHA=$(sha256sum "$SYS_IMG" | awk '{print $1}')
-          ADD_BYTES=$((300 * 1048576))
-          NEW_SIZE=$((ORIG_SIZE + ADD_BYTES))
+          import hashlib
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
 
-          dd if=/dev/zero bs=1M count=300 >> "$SYS_IMG"
-          truncate -s "$NEW_SIZE" "$SYS_IMG"
-          sudo e2fsck -f -y "$SYS_IMG"
-          sudo resize2fs -f "$SYS_IMG"
-          sudo e2fsck -E unshare_blocks -f -y "$SYS_IMG"
-          sudo tune2fs -O ^read-only -m 0 "$SYS_IMG"
-          sudo resize2fs -f "$SYS_IMG"
+          bsys = Path("work/Payload/Andarium.app/andarium-system")
+          layout_p = bsys / "guest/partition-layout.json"
+          manifest_p = bsys / "release-manifest.json"
+          disk_p = bsys / "guest/system.img"
+          logs = []
 
-          sudo mkdir -p /mnt/android
-          sudo mount -o loop,rw "$SYS_IMG" /mnt/android
+          def log(msg):
+              print(msg, flush=True)
+              logs.append(msg)
 
-          DIRS="/mnt/android /mnt/android/system /mnt/android/product"
-          DIRS="$DIRS /mnt/android/system/product /mnt/android/system_ext"
-          DIRS="$DIRS /mnt/android/system/system_ext"
-          for BASE in $DIRS; do
-            if [ -d "$BASE" ] && [ ! -L "$BASE" ]; then
-              sudo rm -rf "$BASE"/app/ExactCalculator "$BASE"/app/Etar "$BASE"/app/Calendar
-              sudo rm -rf "$BASE"/app/DeskClock "$BASE"/app/Gallery2 "$BASE"/app/Glimpse
-              sudo rm -rf "$BASE"/app/Eleven "$BASE"/app/Music "$BASE"/app/Aperture
-              sudo rm -rf "$BASE"/app/Contacts "$BASE"/app/Messaging "$BASE"/app/Recorder
-              sudo rm -rf "$BASE"/app/Email "$BASE"/app/PhotoTable "$BASE"/app/BasicDreams
-              sudo rm -rf "$BASE"/app/LiveWallpapersPicker "$BASE"/app/EasterEgg
-              sudo rm -rf "$BASE"/priv-app/Gallery2 "$BASE"/priv-app/Glimpse
-              sudo rm -rf "$BASE"/priv-app/Eleven "$BASE"/priv-app/Music
-              sudo rm -rf "$BASE"/media/bootanimation.zip "$BASE"/tts
-              sudo rm -f "$BASE"/fonts/NotoSansCJK* "$BASE"/fonts/NotoSerifCJK*
-            fi
-          done
+          def sha256_f(p):
+              h = hashlib.sha256()
+              with p.open("rb") as f:
+                  for b in iter(lambda: f.read(4194304), b""):
+                      h.update(b)
+              return h.hexdigest()
 
-          BPS="/mnt/android/system/build.prop /mnt/android/build.prop"
-          BPS="$BPS /mnt/android/product/etc/build.prop"
-          BPS="$BPS /mnt/android/system/product/etc/build.prop"
-          for BP in $BPS; do
-            if [ -f "$BP" ] && [ ! -L "$BP" ]; then
-              sudo cp -a "$BP" /tmp/bp.bak
-              echo "" | sudo tee -a "$BP" > /dev/null
-              echo "ro.sys.fw.bg_apps_limit=2" | sudo tee -a "$BP" > /dev/null
-              echo "ro.config.max_starting_bg=1" | sudo tee -a "$BP" > /dev/null
-              echo "dalvik.vm.heapstartsize=4m" | sudo tee -a "$BP" > /dev/null
-              echo "dalvik.vm.heapgrowthlimit=128m" | sudo tee -a "$BP" > /dev/null
-              echo "dalvik.vm.heapsize=256m" | sudo tee -a "$BP" > /dev/null
-              echo "debug.sf.nobootanimation=1" | sudo tee -a "$BP" > /dev/null
-              echo "persist.sys.sf.disable_blurs=1" | sudo tee -a "$BP" > /dev/null
-              echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=2" | sudo tee -a "$BP" > /dev/null
-              sudo chcon --reference=/tmp/bp.bak "$BP"
-              rm -f /tmp/bp.bak
-            fi
-          done
+          def run(cmd, check=True):
+              log("+ " + " ".join(str(x) for x in cmd))
+              return subprocess.run(cmd, check=check)
 
-          df -h /mnt/android > report/df-after.txt
-          sync
-          sudo umount /mnt/android
+          layout = json.loads(layout_p.read_text(encoding="utf-8"))
+          manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
+          sd = layout["system_disk"]
+          parts = sd["partitions"]
 
-          sudo e2fsck -f -y "$SYS_IMG"
-          sudo tune2fs -O read-only "$SYS_IMG"
-          truncate -s "$NEW_SIZE" "$SYS_IMG"
-          NEW_SHA=$(sha256sum "$SYS_IMG" | awk '{print $1}')
+          pdir = Path("/tmp/gpt_parts")
+          pdir.mkdir(parents=True, exist_ok=True)
 
-          rm -f /tmp/fix.py
-          echo 'import glob, json, os, sys' >> /tmp/fix.py
-          echo 'orig, add = int(sys.argv), int(sys.argv)' >> /tmp/fix.py
-          echo 'osha, nsha = sys.argv.lower(), sys.argv.lower()' >> /tmp/fix.py
-          echo 's512, b4k = orig // 512, orig // 4096' >> /tmp/fix.py
-          echo 'def fix(v):' >> /tmp/fix.py
-          echo '  if isinstance(v, bool): return v' >> /tmp/fix.py
-          echo '  if isinstance(v, int):' >> /tmp/fix.py
-          echo '    if orig <= v <= orig + 16777216: return v + add' >> /tmp/fix.py
-          echo '    if s512 - 100 <= v <= s512 + 10000: return v + (add // 512)' >> /tmp/fix.py
-          echo '    if b4k - 20 <= v <= b4k + 2000: return v + (add // 4096)' >> /tmp/fix.py
-          echo '    return v' >> /tmp/fix.py
-          echo '  if isinstance(v, str): return nsha if v.lower() == osha else v' >> /tmp/fix.py
-          echo '  if isinstance(v, dict): return {k: fix(x) for k, x in v.items()}' >> /tmp/fix.py
-          echo '  if isinstance(v, list): return [fix(x) for x in v]' >> /tmp/fix.py
-          echo '  return v' >> /tmp/fix.py
-          echo 'for p in glob.glob("work/Payload/**/*.json", recursive=True):' >> /tmp/fix.py
-          echo '  try:' >> /tmp/fix.py
-          echo '    d = fix(json.load(open(p)))' >> /tmp/fix.py
-          echo '    json.dump(d, open(p, "w"), indent=2)' >> /tmp/fix.py
-          echo '    json.dump(d, open("report/new-" + os.path.basename(p), "w"), indent=2)' >> /tmp/fix.py
-          echo '  except Exception as e: print(p, e)' >> /tmp/fix.py
-          python3 /tmp/fix.py "$ORIG_SIZE" "$ADD_BYTES" "$ORIG_SHA" "$NEW_SHA"
-          exit 0
+          with disk_p.open("rb") as df:
+              for p in parts:
+                  out = pdir / (p["name"] + ".img")
+                  df.seek(p["start_bytes"])
+                  rem = p["size_bytes"]
+                  with out.open("wb") as wf:
+                      while rem > 0:
+                          c = df.read(min(4194304, rem))
+                          if not c:
+                              break
+                          wf.write(c)
+                          rem -= len(c)
+                  log(f"Extracted {p['name']}: {out.stat().st_size} bytes")
 
-      - name: Step 4 - Repackage IPA
+          APPS = [
+              "ExactCalculator", "Calculator", "Etar", "Calendar",
+              "DeskClock", "Gallery2", "Glimpse", "Eleven", "Music",
+              "Aperture", "Camera2", "Contacts", "Messaging",
+              "Recorder", "Email", "PhotoTable", "BasicDreams",
+              "LiveWallpapersPicker", "EasterEgg",
+          ]
+
+          LOWRAM_PROPS = "\n".join([
+              "",
+              "# Low-RAM Configuration",
+              "ro.config.low_ram=true",
+              "ro.sys.fw.bg_apps_limit=2",
+              "ro.config.max_starting_bg=1",
+              "dalvik.vm.heapstartsize=4m",
+              "dalvik.vm.heapgrowthlimit=128m",
+              "dalvik.vm.heapsize=384m",
+              "debug.sf.nobootanimation=1",
+              "persist.sys.sf.disable_blurs=1",
+              "ro.surface_flinger.supports_background_blur=0",
+              "ro.surface_flinger.max_frame_buffer_acquired_buffers=2",
+              "",
+          ])
+
+          def optimize_dir(root):
+              bases = [root]
+              sys_sub = root / "system"
+              if sys_sub.is_dir() and not sys_sub.is_symlink():
+                  bases.append(sys_sub)
+              for b in bases:
+                  for folder in ("app", "priv-app"):
+                      d = b / folder
+                      if d.is_dir() and not d.is_symlink():
+                          for a in APPS:
+                              t = d / a
+                              if t.exists():
+                                  log(f"Removed app: {t}")
+                                  run(["sudo", "rm", "-rf", str(t)])
+                  fdir = b / "fonts"
+                  if fdir.is_dir() and not fdir.is_symlink():
+                      for pat in ("NotoSansCJK*", "NotoSerifCJK*"):
+                          for fp in fdir.glob(pat):
+                              log(f"Removed font: {fp.name}")
+                              run(["sudo", "rm", "-f", str(fp)])
+                  ba = b / "media/bootanimation.zip"
+                  if ba.exists():
+                      log(f"Removed bootanimation: {ba}")
+                      run(["sudo", "rm", "-f", str(ba)])
+                  for rel in ("build.prop", "etc/build.prop"):
+                      bp = b / rel
+                      if bp.is_file() and not bp.is_symlink():
+                          log(f"Updated build.prop: {bp}")
+                          pr = subprocess.Popen(
+                              ["sudo", "tee", "-a", str(bp)],
+                              stdin=subprocess.PIPE,
+                              stdout=subprocess.DEVNULL,
+                          )
+                          pr.communicate(LOWRAM_PROPS.encode("utf-8"))
+                          xr = subprocess.run(
+                              ["sudo", "getfattr", "-d", "-m", "^security\\.", str(bp)],
+                              capture_output=True, text=True, check=False,
+                          )
+                          log(f"SELinux xattr check: {xr.stdout.strip()}")
+
+          for name in ("system", "product", "system_ext"):
+              p_img = pdir / f"{name}.img"
+              with p_img.open("rb") as f:
+                  hdr = f.read(2048)
+              is_erofs = hdr[1024:1028] == b"\xe2\xe1\xf5\xe0"
+              is_ext4 = hdr[1080:1082] == b"\x53\xef"
+              log(f"Check {name}: erofs={is_erofs} ext4={is_ext4}")
+
+              u_res = subprocess.run(
+                  ["sudo", "blkid", "-s", "UUID", "-o", "value", str(p_img)],
+                  capture_output=True, text=True,
+              )
+              fs_uuid = u_res.stdout.strip()
+              l_res = subprocess.run(
+                  ["sudo", "blkid", "-s", "LABEL", "-o", "value", str(p_img)],
+                  capture_output=True, text=True,
+              )
+              fs_label = l_res.stdout.strip()
+
+              if is_erofs:
+                  m_ro = Path("/tmp/m_ro")
+                  m_rw = Path("/tmp/m_rw")
+                  m_ro.mkdir(exist_ok=True)
+                  m_rw.mkdir(exist_ok=True)
+                  scr = Path("/tmp/scratch_ext4.img")
+                  run(["rm", "-f", str(scr)], check=False)
+                  run(["truncate", "-s", "1400M", str(scr)])
+                  run(["mkfs.ext4", "-F", "-q", str(scr)])
+                  run(["sudo", "mount", "-t", "erofs", "-o", "loop,ro", str(p_img), str(m_ro)])
+                  run(["sudo", "mount", "-o", "loop,rw", str(scr), str(m_rw)])
+                  run(["sudo", "rm", "-rf", str(m_rw / "lost+found")])
+                  run(["sudo", "cp", "-a", f"{m_ro}/.", f"{m_rw}/"])
+                  optimize_dir(m_rw)
+                  out_img = pdir / f"{name}.new.img"
+                  cmd = ["sudo", "mkfs.erofs", "-b", "4096"]
+                  if fs_uuid:
+                      cmd += ["-U", fs_uuid]
+                  if fs_label:
+                      cmd += ["-L", fs_label]
+                  cmd += [str(out_img), str(m_rw)]
+                  run(cmd)
+                  run(["sudo", "umount", str(m_ro)])
+                  run(["sudo", "umount", str(m_rw)])
+                  run(["rm", "-f", str(scr)], check=False)
+                  run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(out_img)])
+                  out_img.replace(p_img)
+              elif is_ext4:
+                  run(["truncate", "-s", "+250M", str(p_img)])
+                  run(["sudo", "e2fsck", "-f", "-y", str(p_img)], check=False)
+                  run(["sudo", "resize2fs", "-f", str(p_img)])
+                  run(["sudo", "e2fsck", "-E", "unshare_blocks", "-f", "-y", str(p_img)], check=False)
+                  run(["sudo", "tune2fs", "-O", "^read-only", "-m", "0", str(p_img)])
+                  run(["sudo", "resize2fs", "-f", str(p_img)])
+                  m_rw = Path("/tmp/m_ext4")
+                  m_rw.mkdir(exist_ok=True)
+                  run(["sudo", "mount", "-o", "loop,rw", str(p_img), str(m_rw)])
+                  optimize_dir(m_rw)
+                  run(["sudo", "umount", str(m_rw)])
+                  run(["sudo", "e2fsck", "-f", "-y", str(p_img)], check=False)
+                  run(["sudo", "resize2fs", "-f", "-M", str(p_img)])
+                  run(["sudo", "e2fsck", "-f", "-y", str(p_img)], check=False)
+                  run(["sudo", "tune2fs", "-O", "read-only", str(p_img)])
+
+              sz = p_img.stat().st_size
+              aln = ((sz + 4095) // 4096) * 4096
+              if aln != sz:
+                  run(["truncate", "-s", str(aln), str(p_img)])
+              log(f"Final {name} size: {p_img.stat().st_size} bytes")
+
+          offset = 20480
+          for p in parts:
+              p_img = pdir / (p["name"] + ".img")
+              sz = p_img.stat().st_size
+              p["start_bytes"] = offset
+              p["size_bytes"] = sz
+              p["image_bytes"] = sz
+              p["sha256"] = sha256_f(p_img)
+              offset += sz
+
+          total_bytes = offset + 20480
+          new_disk = pdir / "rebuilt_system.img"
+          run(["rm", "-f", str(new_disk)], check=False)
+          run(["truncate", "-s", str(total_bytes), str(new_disk)])
+          run(["sgdisk", "--clear", str(new_disk)])
+          run(["sgdisk", f"--disk-guid={sd['disk_guid']}", str(new_disk)])
+
+          for i, p in enumerate(parts, 1):
+              s_sec = p["start_bytes"] // 512
+              e_sec = (p["start_bytes"] + p["size_bytes"]) // 512 - 1
+              run([
+                  "sgdisk",
+                  "--set-alignment=8",
+                  f"--new={i}:{s_sec}:{e_sec}",
+                  f"--typecode={i}:{p['type_guid']}",
+                  f"--partition-guid={i}:{p['unique_guid']}",
+                  f"--change-name={i}:{p['name']}",
+                  str(new_disk),
+              ])
+
+          with new_disk.open("r+b") as df:
+              for p in parts:
+                  p_img = pdir / (p["name"] + ".img")
+                  df.seek(p["start_bytes"])
+                  with p_img.open("rb") as pf:
+                      for b in iter(lambda: pf.read(4194304), b""):
+                          df.write(b)
+
+          run(["sgdisk", "--verify", str(new_disk)])
+          new_disk.replace(disk_p)
+
+          sd["size_bytes"] = disk_p.stat().st_size
+          sd["sha256"] = sha256_f(disk_p)
+          layout_p.write_text(json.dumps(layout, indent=2) + "\n", encoding="utf-8")
+
+          for item in manifest["inventory"]:
+              rel = item.get("path")
+              if rel in ("boot/kernel-command-line.txt", "guest/partition-layout.json", "guest/system.img"):
+                  item["size"] = (bsys / rel).stat().st_size
+
+          manifest_p.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          log(f"SUCCESS! New GPT system.img size={sd['size_bytes']} sha256={sd['sha256']}")
+          Path("report/mod-summary.txt").write_text("\n".join(logs) + "\n", encoding="utf-8")
+          Path("report/partition-layout.new.json").write_text(layout_p.read_text(), encoding="utf-8")
+          Path("report/release-manifest.new.json").write_text(manifest_p.read_text(), encoding="utf-8")
+
+      - name: Step 3 - Repackage IPA
         run: |
           cd work
-          zip -q -r -y ../Expanded-Andarium.ipa Payload
+          zip -q -r -y ../CustomLowRAM-Andarium.ipa Payload
 
-      - name: Step 5 - Upload Modified IPA
+      - name: Step 4 - Upload Custom IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Expanded-LowRAM-IPA
-          path: Expanded-Andarium.ipa
+          name: CustomLowRAM-Andarium-IPA
+          path: CustomLowRAM-Andarium.ipa
 
-      - name: Step 6 - Upload Layout Report
+      - name: Step 5 - Upload Mod Summary
         uses: actions/upload-artifact@v4
         with:
-          name: Layout-Report
+          name: Mod-Summary-Report
           path: report/
