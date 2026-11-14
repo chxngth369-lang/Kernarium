@@ -1,11 +1,11 @@
-name: Build Official ZSTD Low RAM IPA
+name: Build Smooth Low RAM IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-zstd-ipa:
+  build-smooth-ipa:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -18,13 +18,11 @@ jobs:
         run: |
           set +e
           sudo apt-get update -y
-          sudo apt-get install -y e2fsprogs erofs-utils gdisk attr util-linux unzip zip wget curl jq
+          sudo apt-get install -y e2fsprogs erofs-utils attr util-linux unzip zip wget curl jq
           sudo apt-get install -y build-essential autoconf automake libtool pkg-config libzstd-dev liblz4-dev uuid-dev
           sudo modprobe erofs || true
 
-          mkdir -p work report
-          cp upstream/Kernarium/Runtime/* report/ 2>/dev/null || true
-
+          mkdir -p work
           API="https://api.github.com/repos/imxieyi/Kernarium/releases"
           Q='[.[] | .assets[]? | select(.name | endswith(".ipa")) | .browser_download_url][0]'
           IPA_URL=$(curl -sL "$API" | jq -r "$Q")
@@ -33,7 +31,7 @@ jobs:
           unzip -q -o Andarium.ipa -d work
           exit 0
 
-      - name: Step 3 - Repack ZSTD EROFS and Assemble Official UBD Disk
+      - name: Step 3 - Clean Product Partition Keeping Precompiled Boot Intact
         shell: python3 {0}
         run: |
           import json
@@ -46,14 +44,9 @@ jobs:
           layout_p = bsys / "guest/partition-layout.json"
           manifest_p = bsys / "release-manifest.json"
           disk_p = bsys / "guest/system.img"
-          logs = []
-
-          def log(msg):
-              print(msg, flush=True)
-              logs.append(msg)
 
           def run(cmd, check=True):
-              log("+ " + " ".join(str(x) for x in cmd))
+              print("+", " ".join(str(x) for x in cmd), flush=True)
               return subprocess.run(cmd, check=check)
 
           mkfs_erofs = "mkfs.erofs"
@@ -67,7 +60,6 @@ jobs:
               capture_output=True, text=True, check=False,
           )
           if pr_test.returncode != 0:
-              log("Building erofs-utils with libzstd support...")
               src = Path("/tmp/erofs-src")
               shutil.rmtree(src, ignore_errors=True)
               r1 = subprocess.run([
@@ -84,9 +76,6 @@ jobs:
               subprocess.run(["./configure", "--enable-lz4", "--with-libzstd"], cwd=src, check=True)
               subprocess.run(["make", "-j4"], cwd=src, check=True)
               mkfs_erofs = str((src / "mkfs/mkfs.erofs").resolve())
-              log(f"Built custom mkfs.erofs at: {mkfs_erofs}")
-          else:
-              log("System mkfs.erofs natively supports -zzstd!")
 
           layout = json.loads(layout_p.read_text(encoding="utf-8"))
           manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
@@ -108,111 +97,76 @@ jobs:
                               break
                           wf.write(c)
                           rem -= len(c)
-                  log(f"Extracted {p['name']}: {out.stat().st_size} bytes")
 
-          APPS = [
-              "ExactCalculator", "Calculator", "Etar", "Calendar",
-              "DeskClock", "Gallery2", "Glimpse", "Eleven", "Music",
-              "Aperture", "Camera2", "Contacts", "Messaging",
-              "Recorder", "Email", "PhotoTable", "BasicDreams",
-              "LiveWallpapersPicker", "EasterEgg",
-          ]
+          p_img = pdir / "product.img"
+          u_res = subprocess.run(
+              ["sudo", "blkid", "-s", "UUID", "-o", "value", str(p_img)],
+              capture_output=True, text=True,
+          )
+          fs_uuid = u_res.stdout.strip()
+          l_res = subprocess.run(
+              ["sudo", "blkid", "-s", "LABEL", "-o", "value", str(p_img)],
+              capture_output=True, text=True,
+          )
+          fs_label = l_res.stdout.strip()
 
-          LOWRAM_PROPS = "\n".join([
+          m_ro = Path("/tmp/m_ro")
+          m_rw = Path("/tmp/m_rw")
+          m_ro.mkdir(exist_ok=True)
+          m_rw.mkdir(exist_ok=True)
+          scr = Path("/tmp/scratch_ext4.img")
+          run(["rm", "-f", str(scr)], check=False)
+          run(["truncate", "-s", "800M", str(scr)])
+          run(["mkfs.ext4", "-F", "-q", str(scr)])
+          run(["sudo", "mount", "-t", "erofs", "-o", "loop,ro", str(p_img), str(m_ro)])
+          run(["sudo", "mount", "-o", "loop,rw", str(scr), str(m_rw)])
+          run(["sudo", "rm", "-rf", str(m_rw / "lost+found")])
+          run(["sudo", "cp", "-a", f"{m_ro}/.", f"{m_rw}/"])
+
+          rx = subprocess.run(
+              ["sudo", "getfattr", "--only-values", "-n", "security.selinux", str(m_ro)],
+              capture_output=True, text=True, check=False,
+          )
+          if rx.returncode == 0 and rx.stdout.strip():
+              run(["sudo", "setfattr", "-n", "security.selinux", "-v", rx.stdout.strip(), str(m_rw)])
+
+          for app in ("ExactCalculator", "Etar", "Glimpse", "Gallery2", "Eleven", "Music"):
+              t = m_rw / "app" / app
+              if t.exists():
+                  print(f"Removing /product/app/{app}", flush=True)
+                  run(["sudo", "rm", "-rf", str(t)])
+
+          SAFE_PROPS = "\n".join([
               "",
-              "# Low-RAM Configuration",
-              "ro.config.low_ram=true",
-              "ro.sys.fw.bg_apps_limit=2",
-              "ro.config.max_starting_bg=1",
-              "dalvik.vm.heapstartsize=4m",
-              "dalvik.vm.heapgrowthlimit=128m",
-              "dalvik.vm.heapsize=384m",
-              "debug.sf.nobootanimation=1",
+              "# Safe GPU & Background Process Optimization",
               "persist.sys.sf.disable_blurs=1",
               "ro.surface_flinger.supports_background_blur=0",
-              "ro.surface_flinger.max_frame_buffer_acquired_buffers=2",
+              "ro.sys.fw.bg_apps_limit=4",
               "",
           ])
-
-          def optimize_dir(root):
-              bases = [root]
-              sys_sub = root / "system"
-              if sys_sub.is_dir() and not sys_sub.is_symlink():
-                  bases.append(sys_sub)
-              for b in bases:
-                  for folder in ("app", "priv-app"):
-                      d = b / folder
-                      if d.is_dir() and not d.is_symlink():
-                          for a in APPS:
-                              t = d / a
-                              if t.exists():
-                                  log(f"Removed app: {t}")
-                                  run(["sudo", "rm", "-rf", str(t)])
-                  fdir = b / "fonts"
-                  if fdir.is_dir() and not fdir.is_symlink():
-                      for pat in ("NotoSansCJK*", "NotoSerifCJK*"):
-                          for fp in fdir.glob(pat):
-                              log(f"Removed font: {fp.name}")
-                              run(["sudo", "rm", "-f", str(fp)])
-                  ba = b / "media/bootanimation.zip"
-                  if ba.exists():
-                      run(["sudo", "rm", "-f", str(ba)])
-                  for rel in ("build.prop", "etc/build.prop"):
-                      bp = b / rel
-                      if bp.is_file() and not bp.is_symlink():
-                          log(f"Updated build.prop: {bp}")
-                          pr = subprocess.Popen(
-                              ["sudo", "tee", "-a", str(bp)],
-                              stdin=subprocess.PIPE,
-                              stdout=subprocess.DEVNULL,
-                          )
-                          pr.communicate(LOWRAM_PROPS.encode("utf-8"))
-
-          for name in ("system", "product", "system_ext"):
-              p_img = pdir / f"{name}.img"
-              u_res = subprocess.run(
-                  ["sudo", "blkid", "-s", "UUID", "-o", "value", str(p_img)],
-                  capture_output=True, text=True,
+          bp = m_rw / "etc/build.prop"
+          if bp.is_file() and not bp.is_symlink():
+              pr = subprocess.Popen(
+                  ["sudo", "tee", "-a", str(bp)],
+                  stdin=subprocess.PIPE,
+                  stdout=subprocess.DEVNULL,
               )
-              fs_uuid = u_res.stdout.strip()
-              l_res = subprocess.run(
-                  ["sudo", "blkid", "-s", "LABEL", "-o", "value", str(p_img)],
-                  capture_output=True, text=True,
-              )
-              fs_label = l_res.stdout.strip()
+              pr.communicate(SAFE_PROPS.encode("utf-8"))
 
-              m_ro = Path("/tmp/m_ro")
-              m_rw = Path("/tmp/m_rw")
-              m_ro.mkdir(exist_ok=True)
-              m_rw.mkdir(exist_ok=True)
-              scr = Path("/tmp/scratch_ext4.img")
-              run(["rm", "-f", str(scr)], check=False)
-              run(["truncate", "-s", "1400M", str(scr)])
-              run(["mkfs.ext4", "-F", "-q", str(scr)])
-              run(["sudo", "mount", "-t", "erofs", "-o", "loop,ro", str(p_img), str(m_ro)])
-              run(["sudo", "mount", "-o", "loop,rw", str(scr), str(m_rw)])
-              run(["sudo", "rm", "-rf", str(m_rw / "lost+found")])
-              run(["sudo", "cp", "-a", f"{m_ro}/.", f"{m_rw}/"])
-              optimize_dir(m_rw)
+          out_img = pdir / "product.new.img"
+          cmd = ["sudo", mkfs_erofs, "-zzstd", "-b", "4096", "-T", "1230768000"]
+          if fs_uuid:
+              cmd += ["-U", fs_uuid]
+          if fs_label:
+              cmd += ["-L", fs_label]
+          cmd += [str(out_img), str(m_rw)]
+          run(cmd)
 
-              out_img = pdir / f"{name}.new.img"
-              cmd = [
-                  "sudo", mkfs_erofs,
-                  "-zzstd", "-b", "4096", "-T", "1230768000",
-              ]
-              if fs_uuid:
-                  cmd += ["-U", fs_uuid]
-              if fs_label:
-                  cmd += ["-L", fs_label]
-              cmd += [str(out_img), str(m_rw)]
-              run(cmd)
-
-              run(["sudo", "umount", str(m_ro)])
-              run(["sudo", "umount", str(m_rw)])
-              run(["rm", "-f", str(scr)], check=False)
-              run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(out_img)])
-              out_img.replace(p_img)
-              log(f"ZSTD compressed {name}: {p_img.stat().st_size} bytes")
+          run(["sudo", "umount", str(m_ro)])
+          run(["sudo", "umount", str(m_rw)])
+          run(["rm", "-f", str(scr)], check=False)
+          run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(out_img)])
+          out_img.replace(p_img)
 
           assembled = Path("/tmp/assembled_out")
           shutil.rmtree(assembled, ignore_errors=True)
@@ -245,25 +199,15 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          new_sz = disk_p.stat().st_size
-          log(f"ALL OFFICIAL CHECKS PASSED! Final system.img size: {new_sz} bytes")
-          Path("report/zstd-summary.txt").write_text("\n".join(logs) + "\n", encoding="utf-8")
-          shutil.copyfile(layout_p, "report/partition-layout.zstd.json")
-          shutil.copyfile(manifest_p, "report/release-manifest.zstd.json")
+          print("SUCCESS! Smooth system.img size:", disk_p.stat().st_size, flush=True)
 
       - name: Step 4 - Repackage IPA
         run: |
           cd work
-          zip -q -r -y ../ZstdLowRAM-Andarium.ipa Payload
+          zip -q -r -y ../SmoothLowRAM-Andarium.ipa Payload
 
-      - name: Step 5 - Upload ZSTD Low RAM IPA
+      - name: Step 5 - Upload Smooth Low RAM IPA
         uses: actions/upload-artifact@v4
         with:
-          name: ZstdLowRAM-Andarium-IPA
-          path: ZstdLowRAM-Andarium.ipa
-
-      - name: Step 6 - Upload ZSTD Build Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: Zstd-Build-Report
-          path: report/
+          name: SmoothLowRAM-Andarium-IPA
+          path: SmoothLowRAM-Andarium.ipa
