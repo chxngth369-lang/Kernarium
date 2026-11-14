@@ -1,11 +1,11 @@
-name: Build Smooth Gaming V2 IPA
+name: Build GB27 Tuned Gaming IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-smooth-v2:
+  build-gb27-ipa:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -30,7 +30,7 @@ jobs:
           unzip -q -o Andarium.ipa -d work
           exit 0
 
-      - name: Step 3 - Optimize Product Partition Safely for 3D Games
+      - name: Step 3 - Tune Product Partition and VRAM Cache for GB27
         shell: python3 {0}
         run: |
           import json
@@ -157,10 +157,14 @@ jobs:
 
           ULTRA_PROPS = "\n".join([
               "",
-              "# Game-Safe Max Smoothness Tuning",
+              "# GB27 3D Engine & VRAM Cache Tuning",
               "persist.sys.sf.disable_blurs=1",
               "ro.surface_flinger.supports_background_blur=0",
               "ro.launcher.blur.appLaunch=0",
+              "ro.hwui.texture_cache_size=24",
+              "ro.hwui.layer_cache_size=16",
+              "ro.hwui.r_buffer_cache_size=4",
+              "ro.hwui.path_cache_size=8",
               "ro.sys.fw.bg_apps_limit=8",
               "persist.traced.enable=0",
               "ro.logd.size=64K",
@@ -221,15 +225,15 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          print("SUCCESS! SmoothGamingV2 system.img size:", disk_p.stat().st_size, flush=True)
+          print("SUCCESS! GB27Tuned system.img size:", disk_p.stat().st_size, flush=True)
 
       - name: Step 4 - Repackage IPA
         run: |
           cd work
-          zip -q -r -y ../SmoothGamingV2-Andarium.ipa Payload
+          zip -q -r -y ../GB27Tuned-Andarium.ipa Payload
 
-      - name: Step 5 - Upload Smooth Gaming V2 IPA
+      - name: Step 5 - Upload GB27 Tuned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: SmoothGamingV2-Andarium-IPA
-          path: SmoothGamingV2-Andarium.ipa
+          name: GB27Tuned-Andarium-IPA
+          path: GB27Tuned-Andarium.ipa
