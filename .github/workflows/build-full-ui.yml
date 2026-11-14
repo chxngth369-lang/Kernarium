@@ -1,11 +1,11 @@
-name: Build Smooth Low RAM IPA
+name: Build Ultra Smooth Gaming IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-smooth-ipa:
+  build-ultra-smooth:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -31,7 +31,7 @@ jobs:
           unzip -q -o Andarium.ipa -d work
           exit 0
 
-      - name: Step 3 - Clean Product Partition Keeping Precompiled Boot Intact
+      - name: Step 3 - Ultra Clean Product Partition and Background Services
         shell: python3 {0}
         run: |
           import json
@@ -130,18 +130,54 @@ jobs:
           if rx.returncode == 0 and rx.stdout.strip():
               run(["sudo", "setfattr", "-n", "security.selinux", "-v", rx.stdout.strip(), str(m_rw)])
 
-          for app in ("ExactCalculator", "Etar", "Glimpse", "Gallery2", "Eleven", "Music"):
+          BLOAT_APPS = (
+              "ExactCalculator",
+              "Calculator",
+              "Etar",
+              "Calendar",
+              "DeskClock",
+              "Glimpse",
+              "Gallery2",
+              "Aperture",
+              "Camera2",
+              "Recorder",
+              "Eleven",
+              "Music",
+              "Jelly",
+              "Browser2",
+              "Messaging",
+              "Contacts",
+              "Dialer",
+              "Email",
+              "BasicDreams",
+              "PhotoTable",
+              "Stk",
+          )
+          for app in BLOAT_APPS:
               t = m_rw / "app" / app
               if t.exists():
                   print(f"Removing /product/app/{app}", flush=True)
                   run(["sudo", "rm", "-rf", str(t)])
 
-          SAFE_PROPS = "\n".join([
+          for media_sub in ("alarms", "ringtones", "notifications"):
+              m_path = m_rw / "media/audio" / media_sub
+              if m_path.is_dir():
+                  for snd in m_path.glob("*"):
+                      if snd.is_file():
+                          run(["sudo", "rm", "-f", str(snd)])
+
+          ULTRA_PROPS = "\n".join([
               "",
-              "# Safe GPU & Background Process Optimization",
+              "# Ultra Smooth Gaming & Daemon Optimization",
               "persist.sys.sf.disable_blurs=1",
               "ro.surface_flinger.supports_background_blur=0",
-              "ro.sys.fw.bg_apps_limit=4",
+              "ro.sys.fw.bg_apps_limit=3",
+              "persist.traced.enable=0",
+              "ro.logd.size=64K",
+              "log.tag.stats_log=S",
+              "ro.config.nocheckin=1",
+              "profiler.force_disable_err_rpt=1",
+              "profiler.force_disable_ulog=1",
               "",
           ])
           bp = m_rw / "etc/build.prop"
@@ -151,7 +187,7 @@ jobs:
                   stdin=subprocess.PIPE,
                   stdout=subprocess.DEVNULL,
               )
-              pr.communicate(SAFE_PROPS.encode("utf-8"))
+              pr.communicate(ULTRA_PROPS.encode("utf-8"))
 
           out_img = pdir / "product.new.img"
           cmd = ["sudo", mkfs_erofs, "-zzstd", "-b", "4096", "-T", "1230768000"]
@@ -199,15 +235,15 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          print("SUCCESS! Smooth system.img size:", disk_p.stat().st_size, flush=True)
+          print("SUCCESS! UltraSmooth system.img size:", disk_p.stat().st_size, flush=True)
 
       - name: Step 4 - Repackage IPA
         run: |
           cd work
-          zip -q -r -y ../SmoothLowRAM-Andarium.ipa Payload
+          zip -q -r -y ../UltraSmooth-Andarium.ipa Payload
 
-      - name: Step 5 - Upload Smooth Low RAM IPA
+      - name: Step 5 - Upload Ultra Smooth IPA
         uses: actions/upload-artifact@v4
         with:
-          name: SmoothLowRAM-Andarium-IPA
-          path: SmoothLowRAM-Andarium.ipa
+          name: UltraSmooth-Andarium-IPA
+          path: UltraSmooth-Andarium.ipa
