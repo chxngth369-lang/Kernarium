@@ -1,11 +1,11 @@
-name: Build Ultra Smooth Gaming IPA
+name: Build Smooth Gaming V2 IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-ultra-smooth:
+  build-smooth-v2:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -26,12 +26,11 @@ jobs:
           API="https://api.github.com/repos/imxieyi/Kernarium/releases"
           Q='[.[] | .assets[]? | select(.name | endswith(".ipa")) | .browser_download_url][0]'
           IPA_URL=$(curl -sL "$API" | jq -r "$Q")
-          echo "Downloading IPA: $IPA_URL"
           wget -q -O Andarium.ipa "$IPA_URL" || curl -fL -o Andarium.ipa "$IPA_URL"
           unzip -q -o Andarium.ipa -d work
           exit 0
 
-      - name: Step 3 - Ultra Clean Product Partition and Background Services
+      - name: Step 3 - Optimize Product Partition Safely for 3D Games
         shell: python3 {0}
         run: |
           import json
@@ -143,15 +142,12 @@ jobs:
               "Recorder",
               "Eleven",
               "Music",
-              "Jelly",
-              "Browser2",
-              "Messaging",
               "Contacts",
               "Dialer",
+              "Messaging",
               "Email",
               "BasicDreams",
               "PhotoTable",
-              "Stk",
           )
           for app in BLOAT_APPS:
               t = m_rw / "app" / app
@@ -159,25 +155,15 @@ jobs:
                   print(f"Removing /product/app/{app}", flush=True)
                   run(["sudo", "rm", "-rf", str(t)])
 
-          for media_sub in ("alarms", "ringtones", "notifications"):
-              m_path = m_rw / "media/audio" / media_sub
-              if m_path.is_dir():
-                  for snd in m_path.glob("*"):
-                      if snd.is_file():
-                          run(["sudo", "rm", "-f", str(snd)])
-
           ULTRA_PROPS = "\n".join([
               "",
-              "# Ultra Smooth Gaming & Daemon Optimization",
+              "# Game-Safe Max Smoothness Tuning",
               "persist.sys.sf.disable_blurs=1",
               "ro.surface_flinger.supports_background_blur=0",
-              "ro.sys.fw.bg_apps_limit=3",
+              "ro.launcher.blur.appLaunch=0",
+              "ro.sys.fw.bg_apps_limit=8",
               "persist.traced.enable=0",
               "ro.logd.size=64K",
-              "log.tag.stats_log=S",
-              "ro.config.nocheckin=1",
-              "profiler.force_disable_err_rpt=1",
-              "profiler.force_disable_ulog=1",
               "",
           ])
           bp = m_rw / "etc/build.prop"
@@ -235,15 +221,15 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          print("SUCCESS! UltraSmooth system.img size:", disk_p.stat().st_size, flush=True)
+          print("SUCCESS! SmoothGamingV2 system.img size:", disk_p.stat().st_size, flush=True)
 
       - name: Step 4 - Repackage IPA
         run: |
           cd work
-          zip -q -r -y ../UltraSmooth-Andarium.ipa Payload
+          zip -q -r -y ../SmoothGamingV2-Andarium.ipa Payload
 
-      - name: Step 5 - Upload Ultra Smooth IPA
+      - name: Step 5 - Upload Smooth Gaming V2 IPA
         uses: actions/upload-artifact@v4
         with:
-          name: UltraSmooth-Andarium-IPA
-          path: UltraSmooth-Andarium.ipa
+          name: SmoothGamingV2-Andarium-IPA
+          path: SmoothGamingV2-Andarium.ipa
