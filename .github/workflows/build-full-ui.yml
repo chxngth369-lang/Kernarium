@@ -1,11 +1,11 @@
-name: Build GB27 Stable Gaming IPA
+name: Build Auto Ready GB27 IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-stable-ipa:
+  build-auto-ready-ipa:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -30,7 +30,7 @@ jobs:
           unzip -q -o Andarium.ipa -d work
           exit 0
 
-      - name: Step 3 - Tune Product Partition for Boot-2 Stability and VRAM
+      - name: Step 3 - Configure Auto Ready Product Partition for GB27
         shell: python3 {0}
         run: |
           import json
@@ -141,6 +141,7 @@ jobs:
               "Camera2",
               "Recorder",
               "Eleven",
+              "Twelve",
               "Music",
               "Contacts",
               "Dialer",
@@ -157,7 +158,15 @@ jobs:
 
           ULTRA_PROPS = "\n".join([
               "",
-              "# GB27 Boot-2 Stability & VRAM Tuning",
+              "# Auto-Ready Stable Gaming Configuration",
+              "ro.product.locale=en-US",
+              "persist.sys.locale=en-US",
+              "persist.sys.language=en",
+              "persist.sys.country=US",
+              "mesa.shader.cache.disable=true",
+              "vendor.mesa.shader.cache.disable=true",
+              "debug.mesa.shader.cache.disable=true",
+              "ro.egl.blobcache.multifile=false",
               "persist.sys.sf.disable_blurs=1",
               "ro.surface_flinger.supports_background_blur=0",
               "ro.launcher.blur.appLaunch=0",
@@ -165,10 +174,6 @@ jobs:
               "ro.hwui.layer_cache_size=16",
               "ro.hwui.r_buffer_cache_size=4",
               "ro.hwui.path_cache_size=8",
-              "pm.dexopt.install=verify",
-              "pm.dexopt.bg-dexopt=verify",
-              "pm.dexopt.boot-after-ota=verify",
-              "ro.egl.blobcache.multifile=false",
               "ro.sys.fw.bg_apps_limit=8",
               "persist.traced.enable=0",
               "ro.logd.size=64K",
@@ -229,15 +234,15 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          print("SUCCESS! GB27Stable system.img size:", disk_p.stat().st_size, flush=True)
+          print("SUCCESS! AutoReadyGB27 system.img size:", disk_p.stat().st_size, flush=True)
 
       - name: Step 4 - Repackage IPA
         run: |
           cd work
-          zip -q -r -y ../GB27Stable-Andarium.ipa Payload
+          zip -q -r -y ../AutoReadyGB27-Andarium.ipa Payload
 
-      - name: Step 5 - Upload GB27 Stable IPA
+      - name: Step 5 - Upload Auto Ready GB27 IPA
         uses: actions/upload-artifact@v4
         with:
-          name: GB27Stable-Andarium-IPA
-          path: GB27Stable-Andarium.ipa
+          name: AutoReadyGB27-Andarium-IPA
+          path: AutoReadyGB27-Andarium.ipa
