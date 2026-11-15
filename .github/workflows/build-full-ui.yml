@@ -1,11 +1,11 @@
-name: Build GB27 Minimal Game OS IPAs
+name: Build GB27 Ultra FPS OpenGLES3 IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-gb27-minimal-os:
+  build-gb27-ultra-fps:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -41,7 +41,7 @@ jobs:
           rm -f Andarium.ipa
           exit 0
 
-      - name: Step 3 - Build Minimal GB27 Game-Only Android Editions
+      - name: Step 3 - Build Ultra FPS OpenGLES3 Edition for GB27
         shell: python3 {0}
         run: |
           import json
@@ -101,16 +101,16 @@ jobs:
                   break
 
           layout = json.loads(layout_p.read_text(encoding="utf-8"))
-          orig_manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
+          manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
           parts = layout["system_disk"]["partitions"]
 
-          base_parts = Path("/tmp/base_parts")
-          shutil.rmtree(base_parts, ignore_errors=True)
-          base_parts.mkdir(parents=True, exist_ok=True)
+          pdir = Path("/tmp/gpt_parts")
+          shutil.rmtree(pdir, ignore_errors=True)
+          pdir.mkdir(parents=True, exist_ok=True)
 
           with disk_p.open("rb") as df:
               for p in parts:
-                  out = base_parts / (p["name"] + ".img")
+                  out = pdir / (p["name"] + ".img")
                   df.seek(p["start_bytes"])
                   rem = p["size_bytes"]
                   with out.open("wb") as wf:
@@ -176,8 +176,7 @@ jobs:
               run(["rm", "-f", str(scr)], check=False)
               run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(dst_img)])
 
-          def tune_minimal_product(root):
-              # Keep ONLY Settings, Files, and Keyboard; remove all other user apps and media
+          def tune_ultra_product(root):
               bloat_apps = (
                   "ExactCalculator",
                   "Calculator",
@@ -213,13 +212,16 @@ jobs:
 
               props = "\n".join([
                   "",
-                  "# Dedicated Minimal GB27 Appliance Props",
+                  "# GB27 Ultra FPS Appliance Props",
                   "ro.product.locale=en-US",
                   "persist.sys.locale=en-US",
                   "persist.sys.sf.disable_blurs=1",
                   "ro.launcher.blur.appLaunch=0",
-                  "ro.sys.fw.bg_apps_limit=4",
+                  "ro.sys.fw.bg_apps_limit=3",
                   "persist.traced.enable=0",
+                  "persist.logd.size=64K",
+                  "debug.graphics.game_default_frame_rate.disabled=true",
+                  "debug.sf.auto_latch_unsignaled=true",
                   "",
               ])
               bp = root / "etc/build.prop"
@@ -231,144 +233,120 @@ jobs:
                   )
                   pr.communicate(props.encode("utf-8"))
 
-          def make_vendor_editor(force_app_gles3: bool):
-              def _edit(root):
-                  # Disable broken virtual V4L2 video service & self-test
-                  for rc_name in (
-                      "android.hardware.media.c2-service-v4l2.rc",
-                      "boringssl_self_test.rc",
-                  ):
-                      rc_p = root / "etc/init" / rc_name
-                      if subprocess.run(["sudo", "test", "-e", str(rc_p)], check=False).returncode == 0:
-                          run(["sudo", "rm", "-f", str(rc_p)])
+          def tune_ultra_vendor(root):
+              for rc_name in (
+                  "android.hardware.media.c2-service-v4l2.rc",
+                  "boringssl_self_test.rc",
+              ):
+                  rc_p = root / "etc/init" / rc_name
+                  if subprocess.run(["sudo", "test", "-e", str(rc_p)], check=False).returncode == 0:
+                      run(["sudo", "rm", "-f", str(rc_p)])
 
-                  if force_app_gles3:
-                      # Restrict vulkan.virtio.so to UID 1000 (SurfaceFlinger) so Android 17 boots 100%
-                      # while user apps (UID 10000+, like GB27) cleanly fall back to libGLESv2_kernarium.so!
-                      vk_so = root / "lib64/hw/vulkan.virtio.so"
-                      if subprocess.run(["sudo", "test", "-e", str(vk_so)], check=False).returncode == 0:
-                          run(["sudo", "chown", "1000:1000", str(vk_so)])
-                          run(["sudo", "chmod", "0600", str(vk_so)])
-                      for xml_name in (
-                          "android.hardware.vulkan.compute-0.xml",
-                          "android.hardware.vulkan.level-1.xml",
-                          "android.hardware.vulkan.version-1_4.xml",
-                      ):
-                          xp = root / "etc/permissions" / xml_name
-                          if subprocess.run(["sudo", "test", "-e", str(xp)], check=False).returncode == 0:
-                              run(["sudo", "rm", "-f", str(xp)])
+              # Proven OpenGL ES 3.2 isolation for GB27 while keeping SurfaceFlinger UID 1000 boot 100% intact
+              vk_so = root / "lib64/hw/vulkan.virtio.so"
+              if subprocess.run(["sudo", "test", "-e", str(vk_so)], check=False).returncode == 0:
+                  run(["sudo", "chown", "1000:1000", str(vk_so)])
+                  run(["sudo", "chmod", "0600", str(vk_so)])
+              for xml_name in (
+                  "android.hardware.vulkan.compute-0.xml",
+                  "android.hardware.vulkan.level-1.xml",
+                  "android.hardware.vulkan.version-1_4.xml",
+              ):
+                  xp = root / "etc/permissions" / xml_name
+                  if subprocess.run(["sudo", "test", "-e", str(xp)], check=False).returncode == 0:
+                      run(["sudo", "rm", "-f", str(xp)])
 
-                  vbp = root / "build.prop"
-                  cat_res = subprocess.run(
-                      ["sudo", "cat", str(vbp)],
-                      capture_output=True, text=True, check=False,
+              vbp = root / "build.prop"
+              cat_res = subprocess.run(
+                  ["sudo", "cat", str(vbp)],
+                  capture_output=True, text=True, check=False,
+              )
+              if cat_res.returncode == 0 and is_real_file(vbp):
+                  replacements = {
+                      "ro.surface_flinger.supports_background_blur=1": "ro.surface_flinger.supports_background_blur=0",
+                      "ro.logd.size=1M": "ro.logd.size=64K",
+                      "tombstoned.max_tombstone_count=100": "tombstoned.max_tombstone_count=2",
+                      "ro.surface_flinger.game_default_frame_rate_override=60": "ro.surface_flinger.game_default_frame_rate_override=120",
+                      "ro.vendor.v4l2_codec2.decoder.supported.h264=true": "ro.vendor.v4l2_codec2.decoder.supported.h264=false",
+                      "ro.vendor.v4l2_codec2.decoder.supported.hevc=true": "ro.vendor.v4l2_codec2.decoder.supported.hevc=false",
+                      "ro.vendor.v4l2_codec2.encoder.supported.h264=true": "ro.vendor.v4l2_codec2.encoder.supported.h264=false",
+                      "ro.vendor.v4l2_codec2.encoder.supported.hevc=true": "ro.vendor.v4l2_codec2.encoder.supported.hevc=false",
+                      "ro.vendor.fingerprint_virtual_hal_start=true": "ro.vendor.fingerprint_virtual_hal_start=false",
+                      "ro.camerax.extensions.enabled=true": "ro.camerax.extensions.enabled=false",
+                      "drm.service.enabled=true": "drm.service.enabled=false",
+                      "bluetooth.profile.bap.unicast.client.enabled=true": "bluetooth.profile.bap.unicast.client.enabled=false",
+                      "bluetooth.profile.bas.client.enabled=true": "bluetooth.profile.bas.client.enabled=false",
+                      "bluetooth.profile.ccp.server.enabled=true": "bluetooth.profile.ccp.server.enabled=false",
+                      "bluetooth.profile.csip.set_coordinator.enabled=true": "bluetooth.profile.csip.set_coordinator.enabled=false",
+                      "bluetooth.profile.hap.client.enabled=true": "bluetooth.profile.hap.client.enabled=false",
+                      "bluetooth.profile.mcp.server.enabled=true": "bluetooth.profile.mcp.server.enabled=false",
+                      "bluetooth.profile.vcp.controller.enabled=true": "bluetooth.profile.vcp.controller.enabled=false",
+                  }
+                  new_lines = []
+                  for line in cat_res.stdout.splitlines():
+                      s = line.strip()
+                      new_lines.append(replacements.get(s, line))
+                  new_lines += [
+                      "",
+                      "# Ultra FPS GLThread & Frame Pacing",
+                      "mesa.glthread=true",
+                      "vendor.mesa.glthread=true",
+                      "ro.egl.blobcache.multifile=false",
+                      "",
+                  ]
+                  patched_text = "\n".join(new_lines) + "\n"
+                  pr = subprocess.Popen(
+                      ["sudo", "tee", str(vbp)],
+                      stdin=subprocess.PIPE,
+                      stdout=subprocess.DEVNULL,
                   )
-                  if cat_res.returncode == 0 and is_real_file(vbp):
-                      replacements = {
-                          "ro.surface_flinger.supports_background_blur=1": "ro.surface_flinger.supports_background_blur=0",
-                          "ro.vendor.v4l2_codec2.decoder.supported.h264=true": "ro.vendor.v4l2_codec2.decoder.supported.h264=false",
-                          "ro.vendor.v4l2_codec2.decoder.supported.hevc=true": "ro.vendor.v4l2_codec2.decoder.supported.hevc=false",
-                          "ro.vendor.v4l2_codec2.encoder.supported.h264=true": "ro.vendor.v4l2_codec2.encoder.supported.h264=false",
-                          "ro.vendor.v4l2_codec2.encoder.supported.hevc=true": "ro.vendor.v4l2_codec2.encoder.supported.hevc=false",
-                          "ro.vendor.fingerprint_virtual_hal_start=true": "ro.vendor.fingerprint_virtual_hal_start=false",
-                          "ro.camerax.extensions.enabled=true": "ro.camerax.extensions.enabled=false",
-                          "drm.service.enabled=true": "drm.service.enabled=false",
-                          "bluetooth.profile.bap.unicast.client.enabled=true": "bluetooth.profile.bap.unicast.client.enabled=false",
-                          "bluetooth.profile.bas.client.enabled=true": "bluetooth.profile.bas.client.enabled=false",
-                          "bluetooth.profile.ccp.server.enabled=true": "bluetooth.profile.ccp.server.enabled=false",
-                          "bluetooth.profile.csip.set_coordinator.enabled=true": "bluetooth.profile.csip.set_coordinator.enabled=false",
-                          "bluetooth.profile.hap.client.enabled=true": "bluetooth.profile.hap.client.enabled=false",
-                          "bluetooth.profile.mcp.server.enabled=true": "bluetooth.profile.mcp.server.enabled=false",
-                          "bluetooth.profile.vcp.controller.enabled=true": "bluetooth.profile.vcp.controller.enabled=false",
-                      }
-                      new_lines = []
-                      for line in cat_res.stdout.splitlines():
-                          s = line.strip()
-                          new_lines.append(replacements.get(s, line))
-                      new_lines += [
-                          "",
-                          "# Dedicated GB27 Vendor Media & Graphics",
-                          "ro.egl.blobcache.multifile=false",
-                          "",
-                      ]
-                      patched_text = "\n".join(new_lines) + "\n"
-                      pr = subprocess.Popen(
-                          ["sudo", "tee", str(vbp)],
-                          stdin=subprocess.PIPE,
-                          stdout=subprocess.DEVNULL,
-                      )
-                      pr.communicate(patched_text.encode("utf-8"))
-              return _edit
+                  pr.communicate(patched_text.encode("utf-8"))
 
-          # Build shared minimal product.img once
-          edit_erofs_image(base_parts / "product.img", base_parts / "product.min.img", tune_minimal_product)
-          (base_parts / "product.min.img").replace(base_parts / "product.img")
+          edit_erofs_image(pdir / "product.img", pdir / "product.new.img", tune_ultra_product)
+          (pdir / "product.new.img").replace(pdir / "product.img")
 
+          edit_erofs_image(pdir / "vendor.img", pdir / "vendor.new.img", tune_ultra_vendor)
+          (pdir / "vendor.new.img").replace(pdir / "vendor.img")
+
+          assembled = Path("/tmp/assembled_ultra")
+          shutil.rmtree(assembled, ignore_errors=True)
           ubd_tool = Path("upstream/android/lineage-24/tools/ubd-disk.py").resolve()
           policy_p = Path("upstream/android/lineage-24/support/image/disk-policy.json").resolve()
 
-          def build_ipa_variant(variant_name: str, force_app_gles3: bool, out_ipa: Path):
-              vdir = Path(f"/tmp/parts_{variant_name}")
-              shutil.rmtree(vdir, ignore_errors=True)
-              shutil.copytree(base_parts, vdir)
+          run([
+              "python3", str(ubd_tool), "assemble",
+              "--policy", str(policy_p),
+              "--images-dir", str(pdir.resolve()),
+              "--output-dir", str(assembled.resolve()),
+          ])
+          run([
+              "python3", str(ubd_tool), "verify",
+              "--layout", str((assembled / "partition-layout.json").resolve()),
+              "--disk", str((assembled / "system.img").resolve()),
+              "--hash",
+              "--policy", str(policy_p),
+          ])
 
-              edit_erofs_image(
-                  vdir / "vendor.img",
-                  vdir / "vendor.new.img",
-                  make_vendor_editor(force_app_gles3),
-              )
-              (vdir / "vendor.new.img").replace(vdir / "vendor.img")
+          shutil.copyfile(assembled / "system.img", disk_p)
+          shutil.copyfile(assembled / "partition-layout.json", layout_p)
 
-              assembled = Path(f"/tmp/assembled_{variant_name}")
-              shutil.rmtree(assembled, ignore_errors=True)
-              run([
-                  "python3", str(ubd_tool), "assemble",
-                  "--policy", str(policy_p),
-                  "--images-dir", str(vdir.resolve()),
-                  "--output-dir", str(assembled.resolve()),
-              ])
-              run([
-                  "python3", str(ubd_tool), "verify",
-                  "--layout", str((assembled / "partition-layout.json").resolve()),
-                  "--disk", str((assembled / "system.img").resolve()),
-                  "--hash",
-                  "--policy", str(policy_p),
-              ])
+          for item in manifest["inventory"]:
+              rel = item.get("path")
+              if rel in ("boot/kernel-command-line.txt", "guest/partition-layout.json", "guest/system.img"):
+                  item["size"] = (bsys / rel).stat().st_size
+          manifest_p.write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print("SUCCESS! UltraFPS system.img size:", disk_p.stat().st_size, flush=True)
 
-              shutil.copyfile(assembled / "system.img", disk_p)
-              shutil.copyfile(assembled / "partition-layout.json", layout_p)
+      - name: Step 4 - Repackage Ultra FPS IPA
+        run: |
+          cd work
+          zip -q -r -y ../GB27-UltraFPS-OpenGLES3.ipa Payload
 
-              manifest = json.loads(json.dumps(orig_manifest))
-              for item in manifest["inventory"]:
-                  rel = item.get("path")
-                  if rel in ("boot/kernel-command-line.txt", "guest/partition-layout.json", "guest/system.img"):
-                      item["size"] = (bsys / rel).stat().st_size
-              manifest_p.write_text(
-                  json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-                  encoding="utf-8",
-              )
-
-              out_ipa.unlink(missing_ok=True)
-              subprocess.run(
-                  ["zip", "-q", "-r", "-y", str(out_ipa.resolve()), "Payload"],
-                  cwd="work",
-                  check=True,
-              )
-              shutil.rmtree(vdir, ignore_errors=True)
-              shutil.rmtree(assembled, ignore_errors=True)
-              print(f"BUILT {out_ipa.name} successfully!", flush=True)
-
-          build_ipa_variant("gles3", True, Path("GB27-Only-OpenGLES3.ipa"))
-          build_ipa_variant("vkfix", False, Path("GB27-Only-VulkanMediaFix.ipa"))
-
-      - name: Step 4 - Upload GB27 Only OpenGLES3 IPA (Recommended)
+      - name: Step 5 - Upload GB27 Ultra FPS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: 1-GB27-Only-OpenGLES3-IPA
-          path: GB27-Only-OpenGLES3.ipa
-
-      - name: Step 5 - Upload GB27 Only VulkanMediaFix IPA (Backup)
-        uses: actions/upload-artifact@v4
-        with:
-          name: 2-GB27-Only-VulkanMediaFix-IPA
-          path: GB27-Only-VulkanMediaFix.ipa
+          name: GB27-UltraFPS-OpenGLES3-IPA
+          path: GB27-UltraFPS-OpenGLES3.ipa
