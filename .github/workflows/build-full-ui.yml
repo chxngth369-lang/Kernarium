@@ -1,11 +1,11 @@
-name: Build GB27 Ultra FPS OpenGLES3 IPA
+name: Build GB27 Extreme FPS Edition IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-gb27-ultra-fps:
+  build-gb27-extreme-fps:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -41,7 +41,7 @@ jobs:
           rm -f Andarium.ipa
           exit 0
 
-      - name: Step 3 - Build Ultra FPS OpenGLES3 Edition for GB27
+      - name: Step 3 - Build Extreme Smooth OpenGLES3 OS for GB27
         shell: python3 {0}
         run: |
           import json
@@ -100,6 +100,16 @@ jobs:
                   zstd_flag = cand
                   break
 
+          lz4_flag = None
+          for cand in ("-zlz4hc,9", "-zlz4hc"):
+              probe_img.unlink(missing_ok=True)
+              if subprocess.run(
+                  [mkfs_erofs, cand, "-b", "4096", str(probe_img), str(probe_dir)],
+                  capture_output=True, text=True, check=False,
+              ).returncode == 0:
+                  lz4_flag = cand
+                  break
+
           layout = json.loads(layout_p.read_text(encoding="utf-8"))
           manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
           parts = layout["system_disk"]["partitions"]
@@ -126,7 +136,7 @@ jobs:
               r2 = subprocess.run(["sudo", "test", "!", "-L", str(path_obj)], check=False)
               return r1.returncode == 0 and r2.returncode == 0
 
-          def edit_erofs_image(src_img: Path, dst_img: Path, edit_fn):
+          def edit_erofs_image(src_img: Path, dst_img: Path, edit_fn, comp_flag: str):
               u_res = subprocess.run(
                   ["sudo", "blkid", "-s", "UUID", "-o", "value", str(src_img)],
                   capture_output=True, text=True,
@@ -163,7 +173,7 @@ jobs:
               edit_fn(m_rw)
 
               dst_img.unlink(missing_ok=True)
-              cmd = ["sudo", mkfs_erofs, zstd_flag, "-b", "4096", "-T", "1230768000"]
+              cmd = ["sudo", mkfs_erofs, comp_flag, "-b", "4096", "-T", "1230768000"]
               if fs_uuid:
                   cmd += ["-U", fs_uuid]
               if fs_label:
@@ -176,7 +186,7 @@ jobs:
               run(["rm", "-f", str(scr)], check=False)
               run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(dst_img)])
 
-          def tune_ultra_product(root):
+          def tune_extreme_product(root):
               bloat_apps = (
                   "ExactCalculator",
                   "Calculator",
@@ -205,23 +215,27 @@ jobs:
                   if subprocess.run(["sudo", "test", "-e", str(t)], check=False).returncode == 0:
                       run(["sudo", "rm", "-rf", str(t)])
 
-              for media_sub in ("media/audio/ringtones", "media/audio/alarms"):
+              for media_sub in ("media/audio/ringtones", "media/audio/alarms", "media/audio/notifications"):
                   ms = root / media_sub
                   if subprocess.run(["sudo", "test", "-e", str(ms)], check=False).returncode == 0:
                       run(["sudo", "rm", "-rf", str(ms)])
 
               props = "\n".join([
                   "",
-                  "# GB27 Ultra FPS Appliance Props",
+                  "# GB27 v0.16.3 Extreme Smooth Appliance Tuning",
                   "ro.product.locale=en-US",
                   "persist.sys.locale=en-US",
                   "persist.sys.sf.disable_blurs=1",
                   "ro.launcher.blur.appLaunch=0",
-                  "ro.sys.fw.bg_apps_limit=3",
+                  "ro.sys.fw.bg_apps_limit=2",
                   "persist.traced.enable=0",
                   "persist.logd.size=64K",
+                  "pm.dexopt.install=speed",
+                  "pm.dexopt.bg-dexopt=speed",
                   "debug.graphics.game_default_frame_rate.disabled=true",
+                  "debug.sf.latch_unsignaled=1",
                   "debug.sf.auto_latch_unsignaled=true",
+                  "debug.sf.disable_backpressure=1",
                   "",
               ])
               bp = root / "etc/build.prop"
@@ -233,7 +247,7 @@ jobs:
                   )
                   pr.communicate(props.encode("utf-8"))
 
-          def tune_ultra_vendor(root):
+          def tune_extreme_vendor(root):
               for rc_name in (
                   "android.hardware.media.c2-service-v4l2.rc",
                   "boringssl_self_test.rc",
@@ -265,7 +279,8 @@ jobs:
                   replacements = {
                       "ro.surface_flinger.supports_background_blur=1": "ro.surface_flinger.supports_background_blur=0",
                       "ro.logd.size=1M": "ro.logd.size=64K",
-                      "tombstoned.max_tombstone_count=100": "tombstoned.max_tombstone_count=2",
+                      "ro.logd.size.stats=64K": "ro.logd.size.stats=16K",
+                      "tombstoned.max_tombstone_count=100": "tombstoned.max_tombstone_count=1",
                       "ro.surface_flinger.game_default_frame_rate_override=60": "ro.surface_flinger.game_default_frame_rate_override=120",
                       "ro.vendor.v4l2_codec2.decoder.supported.h264=true": "ro.vendor.v4l2_codec2.decoder.supported.h264=false",
                       "ro.vendor.v4l2_codec2.decoder.supported.hevc=true": "ro.vendor.v4l2_codec2.decoder.supported.hevc=false",
@@ -288,7 +303,7 @@ jobs:
                       new_lines.append(replacements.get(s, line))
                   new_lines += [
                       "",
-                      "# Ultra FPS GLThread & Frame Pacing",
+                      "# Extreme Smooth GLThread & Low-Latency Compositor",
                       "mesa.glthread=true",
                       "vendor.mesa.glthread=true",
                       "ro.egl.blobcache.multifile=false",
@@ -302,23 +317,42 @@ jobs:
                   )
                   pr.communicate(patched_text.encode("utf-8"))
 
-          edit_erofs_image(pdir / "product.img", pdir / "product.new.img", tune_ultra_product)
-          (pdir / "product.new.img").replace(pdir / "product.img")
+          orig_product = pdir / "product.orig.img"
+          shutil.copyfile(pdir / "product.img", orig_product)
 
-          edit_erofs_image(pdir / "vendor.img", pdir / "vendor.new.img", tune_ultra_vendor)
+          edit_erofs_image(pdir / "vendor.img", pdir / "vendor.new.img", tune_extreme_vendor, zstd_flag)
           (pdir / "vendor.new.img").replace(pdir / "vendor.img")
 
-          assembled = Path("/tmp/assembled_ultra")
-          shutil.rmtree(assembled, ignore_errors=True)
           ubd_tool = Path("upstream/android/lineage-24/tools/ubd-disk.py").resolve()
           policy_p = Path("upstream/android/lineage-24/support/image/disk-policy.json").resolve()
+          assembled = Path("/tmp/assembled_extreme")
 
-          run([
-              "python3", str(ubd_tool), "assemble",
-              "--policy", str(policy_p),
-              "--images-dir", str(pdir.resolve()),
-              "--output-dir", str(assembled.resolve()),
-          ])
+          # Try ultra-fast LZ4HC decompression for product.img first; auto-fallback to ZSTD if > 1000 MB policy
+          assembled_ok = False
+          if lz4_flag:
+              edit_erofs_image(orig_product, pdir / "product.img", tune_extreme_product, lz4_flag)
+              shutil.rmtree(assembled, ignore_errors=True)
+              res = subprocess.run([
+                  "python3", str(ubd_tool), "assemble",
+                  "--policy", str(policy_p),
+                  "--images-dir", str(pdir.resolve()),
+                  "--output-dir", str(assembled.resolve()),
+              ])
+              if res.returncode == 0:
+                  print("FAST LZ4HC product.img fit within disk policy!", flush=True)
+                  assembled_ok = True
+
+          if not assembled_ok:
+              edit_erofs_image(orig_product, pdir / "product.img", tune_extreme_product, zstd_flag)
+              shutil.rmtree(assembled, ignore_errors=True)
+              run([
+                  "python3", str(ubd_tool), "assemble",
+                  "--policy", str(policy_p),
+                  "--images-dir", str(pdir.resolve()),
+                  "--output-dir", str(assembled.resolve()),
+              ])
+
+          orig_product.unlink(missing_ok=True)
           run([
               "python3", str(ubd_tool), "verify",
               "--layout", str((assembled / "partition-layout.json").resolve()),
@@ -338,15 +372,15 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          print("SUCCESS! UltraFPS system.img size:", disk_p.stat().st_size, flush=True)
+          print("SUCCESS! ExtremeFPS system.img size:", disk_p.stat().st_size, flush=True)
 
-      - name: Step 4 - Repackage Ultra FPS IPA
+      - name: Step 4 - Repackage Extreme FPS IPA
         run: |
           cd work
-          zip -q -r -y ../GB27-UltraFPS-OpenGLES3.ipa Payload
+          zip -q -r -y ../GB27-ExtremeFPS-OpenGLES3.ipa Payload
 
-      - name: Step 5 - Upload GB27 Ultra FPS IPA
+      - name: Step 5 - Upload GB27 Extreme FPS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: GB27-UltraFPS-OpenGLES3-IPA
-          path: GB27-UltraFPS-OpenGLES3.ipa
+          name: GB27-ExtremeFPS-OpenGLES3-IPA
+          path: GB27-ExtremeFPS-OpenGLES3.ipa
