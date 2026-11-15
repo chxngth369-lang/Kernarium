@@ -1,11 +1,11 @@
-name: Build GB27 Extreme FPS Edition IPA
+name: Build GB27 UltraLow RAM and VRAM IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-gb27-extreme-fps:
+  build-gb27-ultralow-mem:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -41,7 +41,7 @@ jobs:
           rm -f Andarium.ipa
           exit 0
 
-      - name: Step 3 - Build Extreme Smooth OpenGLES3 OS for GB27
+      - name: Step 3 - Build UltraLow RAM and Graphics Memory OS for GB27
         shell: python3 {0}
         run: |
           import json
@@ -186,7 +186,7 @@ jobs:
               run(["rm", "-f", str(scr)], check=False)
               run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(dst_img)])
 
-          def tune_extreme_product(root):
+          def tune_ultralow_product(root):
               bloat_apps = (
                   "ExactCalculator",
                   "Calculator",
@@ -222,20 +222,25 @@ jobs:
 
               props = "\n".join([
                   "",
-                  "# GB27 v0.16.3 Extreme Smooth Appliance Tuning",
+                  "# GB27 UltraLow System RAM + UltraLow System VRAM",
                   "ro.product.locale=en-US",
                   "persist.sys.locale=en-US",
+                  "ro.config.low_ram=true",
+                  "ro.recents.grid=true",
+                  "ro.sys.fw.bg_apps_limit=1",
                   "persist.sys.sf.disable_blurs=1",
                   "ro.launcher.blur.appLaunch=0",
-                  "ro.sys.fw.bg_apps_limit=2",
+                  "ro.hwui.texture_cache_size=12",
+                  "ro.hwui.layer_cache_size=8",
+                  "ro.hwui.r_buffer_cache_size=2",
+                  "ro.hwui.path_cache_size=4",
+                  "ro.hwui.gradient_cache_size=0.5",
+                  "ro.hwui.drop_shadow_cache_size=1",
                   "persist.traced.enable=0",
                   "persist.logd.size=64K",
                   "pm.dexopt.install=speed",
                   "pm.dexopt.bg-dexopt=speed",
                   "debug.graphics.game_default_frame_rate.disabled=true",
-                  "debug.sf.latch_unsignaled=1",
-                  "debug.sf.auto_latch_unsignaled=true",
-                  "debug.sf.disable_backpressure=1",
                   "",
               ])
               bp = root / "etc/build.prop"
@@ -247,7 +252,7 @@ jobs:
                   )
                   pr.communicate(props.encode("utf-8"))
 
-          def tune_extreme_vendor(root):
+          def tune_ultralow_vendor(root):
               for rc_name in (
                   "android.hardware.media.c2-service-v4l2.rc",
                   "boringssl_self_test.rc",
@@ -256,7 +261,7 @@ jobs:
                   if subprocess.run(["sudo", "test", "-e", str(rc_p)], check=False).returncode == 0:
                       run(["sudo", "rm", "-f", str(rc_p)])
 
-              # Proven OpenGL ES 3.2 isolation for GB27 while keeping SurfaceFlinger UID 1000 boot 100% intact
+              # Proven OpenGL ES 3.2 isolation without GLThread buffer bloat
               vk_so = root / "lib64/hw/vulkan.virtio.so"
               if subprocess.run(["sudo", "test", "-e", str(vk_so)], check=False).returncode == 0:
                   run(["sudo", "chown", "1000:1000", str(vk_so)])
@@ -303,9 +308,7 @@ jobs:
                       new_lines.append(replacements.get(s, line))
                   new_lines += [
                       "",
-                      "# Extreme Smooth GLThread & Low-Latency Compositor",
-                      "mesa.glthread=true",
-                      "vendor.mesa.glthread=true",
+                      "# Low-VRAM Synchronous GLES3 Mode",
                       "ro.egl.blobcache.multifile=false",
                       "",
                   ]
@@ -320,17 +323,16 @@ jobs:
           orig_product = pdir / "product.orig.img"
           shutil.copyfile(pdir / "product.img", orig_product)
 
-          edit_erofs_image(pdir / "vendor.img", pdir / "vendor.new.img", tune_extreme_vendor, zstd_flag)
+          edit_erofs_image(pdir / "vendor.img", pdir / "vendor.new.img", tune_ultralow_vendor, zstd_flag)
           (pdir / "vendor.new.img").replace(pdir / "vendor.img")
 
           ubd_tool = Path("upstream/android/lineage-24/tools/ubd-disk.py").resolve()
           policy_p = Path("upstream/android/lineage-24/support/image/disk-policy.json").resolve()
-          assembled = Path("/tmp/assembled_extreme")
+          assembled = Path("/tmp/assembled_ultralow")
 
-          # Try ultra-fast LZ4HC decompression for product.img first; auto-fallback to ZSTD if > 1000 MB policy
           assembled_ok = False
           if lz4_flag:
-              edit_erofs_image(orig_product, pdir / "product.img", tune_extreme_product, lz4_flag)
+              edit_erofs_image(orig_product, pdir / "product.img", tune_ultralow_product, lz4_flag)
               shutil.rmtree(assembled, ignore_errors=True)
               res = subprocess.run([
                   "python3", str(ubd_tool), "assemble",
@@ -339,11 +341,10 @@ jobs:
                   "--output-dir", str(assembled.resolve()),
               ])
               if res.returncode == 0:
-                  print("FAST LZ4HC product.img fit within disk policy!", flush=True)
                   assembled_ok = True
 
           if not assembled_ok:
-              edit_erofs_image(orig_product, pdir / "product.img", tune_extreme_product, zstd_flag)
+              edit_erofs_image(orig_product, pdir / "product.img", tune_ultralow_product, zstd_flag)
               shutil.rmtree(assembled, ignore_errors=True)
               run([
                   "python3", str(ubd_tool), "assemble",
@@ -372,15 +373,15 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          print("SUCCESS! ExtremeFPS system.img size:", disk_p.stat().st_size, flush=True)
+          print("SUCCESS! UltraLowMem system.img size:", disk_p.stat().st_size, flush=True)
 
-      - name: Step 4 - Repackage Extreme FPS IPA
+      - name: Step 4 - Repackage UltraLow RAM and VRAM IPA
         run: |
           cd work
-          zip -q -r -y ../GB27-ExtremeFPS-OpenGLES3.ipa Payload
+          zip -q -r -y ../GB27-UltraLowMem-OpenGLES3.ipa Payload
 
-      - name: Step 5 - Upload GB27 Extreme FPS IPA
+      - name: Step 5 - Upload GB27 UltraLow RAM and VRAM IPA
         uses: actions/upload-artifact@v4
         with:
-          name: GB27-ExtremeFPS-OpenGLES3-IPA
-          path: GB27-ExtremeFPS-OpenGLES3.ipa
+          name: GB27-UltraLowMem-OpenGLES3-IPA
+          path: GB27-UltraLowMem-OpenGLES3.ipa
