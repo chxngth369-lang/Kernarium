@@ -1,11 +1,11 @@
-name: Build GB27 UltraLow RAM and VRAM IPA
+name: Build GB27 Stable LowMem V2 IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-gb27-ultralow-mem:
+  build-gb27-stable-lowmem-v2:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -41,7 +41,7 @@ jobs:
           rm -f Andarium.ipa
           exit 0
 
-      - name: Step 3 - Build UltraLow RAM and Graphics Memory OS for GB27
+      - name: Step 3 - Build Stable LowMem V2 OpenGLES3 OS for GB27
         shell: python3 {0}
         run: |
           import json
@@ -186,7 +186,7 @@ jobs:
               run(["rm", "-f", str(scr)], check=False)
               run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(dst_img)])
 
-          def tune_ultralow_product(root):
+          def tune_stable_product(root):
               bloat_apps = (
                   "ExactCalculator",
                   "Calculator",
@@ -220,22 +220,19 @@ jobs:
                   if subprocess.run(["sudo", "test", "-e", str(ms)], check=False).returncode == 0:
                       run(["sudo", "rm", "-rf", str(ms)])
 
+              # 100% SystemUI-safe properties (NO ro.config.low_ram / NO ro.recents.grid)
               props = "\n".join([
                   "",
-                  "# GB27 UltraLow System RAM + UltraLow System VRAM",
+                  "# GB27 SystemUI-Safe Low RAM & Low VRAM Props",
                   "ro.product.locale=en-US",
                   "persist.sys.locale=en-US",
-                  "ro.config.low_ram=true",
-                  "ro.recents.grid=true",
-                  "ro.sys.fw.bg_apps_limit=1",
+                  "ro.sys.fw.bg_apps_limit=2",
                   "persist.sys.sf.disable_blurs=1",
                   "ro.launcher.blur.appLaunch=0",
-                  "ro.hwui.texture_cache_size=12",
-                  "ro.hwui.layer_cache_size=8",
-                  "ro.hwui.r_buffer_cache_size=2",
-                  "ro.hwui.path_cache_size=4",
-                  "ro.hwui.gradient_cache_size=0.5",
-                  "ro.hwui.drop_shadow_cache_size=1",
+                  "ro.hwui.texture_cache_size=24",
+                  "ro.hwui.layer_cache_size=16",
+                  "ro.hwui.r_buffer_cache_size=4",
+                  "ro.hwui.path_cache_size=8",
                   "persist.traced.enable=0",
                   "persist.logd.size=64K",
                   "pm.dexopt.install=speed",
@@ -252,7 +249,7 @@ jobs:
                   )
                   pr.communicate(props.encode("utf-8"))
 
-          def tune_ultralow_vendor(root):
+          def tune_stable_vendor(root):
               for rc_name in (
                   "android.hardware.media.c2-service-v4l2.rc",
                   "boringssl_self_test.rc",
@@ -261,7 +258,7 @@ jobs:
                   if subprocess.run(["sudo", "test", "-e", str(rc_p)], check=False).returncode == 0:
                       run(["sudo", "rm", "-f", str(rc_p)])
 
-              # Proven OpenGL ES 3.2 isolation without GLThread buffer bloat
+              # Proven OpenGL ES 3.2 isolation without GLThread VRAM spikes
               vk_so = root / "lib64/hw/vulkan.virtio.so"
               if subprocess.run(["sudo", "test", "-e", str(vk_so)], check=False).returncode == 0:
                   run(["sudo", "chown", "1000:1000", str(vk_so)])
@@ -323,16 +320,16 @@ jobs:
           orig_product = pdir / "product.orig.img"
           shutil.copyfile(pdir / "product.img", orig_product)
 
-          edit_erofs_image(pdir / "vendor.img", pdir / "vendor.new.img", tune_ultralow_vendor, zstd_flag)
+          edit_erofs_image(pdir / "vendor.img", pdir / "vendor.new.img", tune_stable_vendor, zstd_flag)
           (pdir / "vendor.new.img").replace(pdir / "vendor.img")
 
           ubd_tool = Path("upstream/android/lineage-24/tools/ubd-disk.py").resolve()
           policy_p = Path("upstream/android/lineage-24/support/image/disk-policy.json").resolve()
-          assembled = Path("/tmp/assembled_ultralow")
+          assembled = Path("/tmp/assembled_stable_v2")
 
           assembled_ok = False
           if lz4_flag:
-              edit_erofs_image(orig_product, pdir / "product.img", tune_ultralow_product, lz4_flag)
+              edit_erofs_image(orig_product, pdir / "product.img", tune_stable_product, lz4_flag)
               shutil.rmtree(assembled, ignore_errors=True)
               res = subprocess.run([
                   "python3", str(ubd_tool), "assemble",
@@ -344,7 +341,7 @@ jobs:
                   assembled_ok = True
 
           if not assembled_ok:
-              edit_erofs_image(orig_product, pdir / "product.img", tune_ultralow_product, zstd_flag)
+              edit_erofs_image(orig_product, pdir / "product.img", tune_stable_product, zstd_flag)
               shutil.rmtree(assembled, ignore_errors=True)
               run([
                   "python3", str(ubd_tool), "assemble",
@@ -373,15 +370,15 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          print("SUCCESS! UltraLowMem system.img size:", disk_p.stat().st_size, flush=True)
+          print("SUCCESS! StableLowMemV2 system.img size:", disk_p.stat().st_size, flush=True)
 
-      - name: Step 4 - Repackage UltraLow RAM and VRAM IPA
+      - name: Step 4 - Repackage Stable LowMem V2 IPA
         run: |
           cd work
-          zip -q -r -y ../GB27-UltraLowMem-OpenGLES3.ipa Payload
+          zip -q -r -y ../GB27-StableLowMemV2-OpenGLES3.ipa Payload
 
-      - name: Step 5 - Upload GB27 UltraLow RAM and VRAM IPA
+      - name: Step 5 - Upload GB27 Stable LowMem V2 IPA
         uses: actions/upload-artifact@v4
         with:
-          name: GB27-UltraLowMem-OpenGLES3-IPA
-          path: GB27-UltraLowMem-OpenGLES3.ipa
+          name: GB27-StableLowMemV2-OpenGLES3-IPA
+          path: GB27-StableLowMemV2-OpenGLES3.ipa
