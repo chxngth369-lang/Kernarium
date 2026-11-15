@@ -1,11 +1,11 @@
-name: Build Auto Ready GB27 IPA
+name: Build GB27 Dedicated Android IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-auto-ready-ipa:
+  build-gb27-dedicated:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -30,7 +30,7 @@ jobs:
           unzip -q -o Andarium.ipa -d work
           exit 0
 
-      - name: Step 3 - Configure Auto Ready Product Partition for GB27
+      - name: Step 3 - Tune Vendor GPU Driver and Proven Product Base for GB27
         shell: python3 {0}
         run: |
           import json
@@ -43,6 +43,8 @@ jobs:
           layout_p = bsys / "guest/partition-layout.json"
           manifest_p = bsys / "release-manifest.json"
           disk_p = bsys / "guest/system.img"
+          rep_dir = Path("report")
+          rep_dir.mkdir(exist_ok=True)
 
           def run(cmd, check=True):
               print("+", " ".join(str(x) for x in cmd), flush=True)
@@ -97,111 +99,134 @@ jobs:
                           wf.write(c)
                           rem -= len(c)
 
-          p_img = pdir / "product.img"
-          u_res = subprocess.run(
-              ["sudo", "blkid", "-s", "UUID", "-o", "value", str(p_img)],
-              capture_output=True, text=True,
-          )
-          fs_uuid = u_res.stdout.strip()
-          l_res = subprocess.run(
-              ["sudo", "blkid", "-s", "LABEL", "-o", "value", str(p_img)],
-              capture_output=True, text=True,
-          )
-          fs_label = l_res.stdout.strip()
-
-          m_ro = Path("/tmp/m_ro")
-          m_rw = Path("/tmp/m_rw")
-          m_ro.mkdir(exist_ok=True)
-          m_rw.mkdir(exist_ok=True)
-          scr = Path("/tmp/scratch_ext4.img")
-          run(["rm", "-f", str(scr)], check=False)
-          run(["truncate", "-s", "800M", str(scr)])
-          run(["mkfs.ext4", "-F", "-q", str(scr)])
-          run(["sudo", "mount", "-t", "erofs", "-o", "loop,ro", str(p_img), str(m_ro)])
-          run(["sudo", "mount", "-o", "loop,rw", str(scr), str(m_rw)])
-          run(["sudo", "rm", "-rf", str(m_rw / "lost+found")])
-          run(["sudo", "cp", "-a", f"{m_ro}/.", f"{m_rw}/"])
-
-          rx = subprocess.run(
-              ["sudo", "getfattr", "--only-values", "-n", "security.selinux", str(m_ro)],
-              capture_output=True, text=True, check=False,
-          )
-          if rx.returncode == 0 and rx.stdout.strip():
-              run(["sudo", "setfattr", "-n", "security.selinux", "-v", rx.stdout.strip(), str(m_rw)])
-
-          BLOAT_APPS = (
-              "ExactCalculator",
-              "Calculator",
-              "Etar",
-              "Calendar",
-              "DeskClock",
-              "Glimpse",
-              "Gallery2",
-              "Aperture",
-              "Camera2",
-              "Recorder",
-              "Eleven",
-              "Twelve",
-              "Music",
-              "Contacts",
-              "Dialer",
-              "Messaging",
-              "Email",
-              "BasicDreams",
-              "PhotoTable",
-          )
-          for app in BLOAT_APPS:
-              t = m_rw / "app" / app
-              if t.exists():
-                  print(f"Removing /product/app/{app}", flush=True)
-                  run(["sudo", "rm", "-rf", str(t)])
-
-          ULTRA_PROPS = "\n".join([
-              "",
-              "# Auto-Ready Stable Gaming Configuration",
-              "ro.product.locale=en-US",
-              "persist.sys.locale=en-US",
-              "persist.sys.language=en",
-              "persist.sys.country=US",
-              "mesa.shader.cache.disable=true",
-              "vendor.mesa.shader.cache.disable=true",
-              "debug.mesa.shader.cache.disable=true",
-              "ro.egl.blobcache.multifile=false",
-              "persist.sys.sf.disable_blurs=1",
-              "ro.surface_flinger.supports_background_blur=0",
-              "ro.launcher.blur.appLaunch=0",
-              "ro.hwui.texture_cache_size=24",
-              "ro.hwui.layer_cache_size=16",
-              "ro.hwui.r_buffer_cache_size=4",
-              "ro.hwui.path_cache_size=8",
-              "ro.sys.fw.bg_apps_limit=8",
-              "persist.traced.enable=0",
-              "ro.logd.size=64K",
-              "",
-          ])
-          bp = m_rw / "etc/build.prop"
-          if bp.is_file() and not bp.is_symlink():
-              pr = subprocess.Popen(
-                  ["sudo", "tee", "-a", str(bp)],
-                  stdin=subprocess.PIPE,
-                  stdout=subprocess.DEVNULL,
+          def edit_erofs(part_name, edit_fn):
+              p_img = pdir / f"{part_name}.img"
+              t_res = subprocess.run(
+                  ["sudo", "blkid", "-s", "TYPE", "-o", "value", str(p_img)],
+                  capture_output=True, text=True,
               )
-              pr.communicate(ULTRA_PROPS.encode("utf-8"))
+              if t_res.stdout.strip() != "erofs":
+                  print(f"Skipping {part_name}: type={t_res.stdout.strip()}", flush=True)
+                  return
+              u_res = subprocess.run(
+                  ["sudo", "blkid", "-s", "UUID", "-o", "value", str(p_img)],
+                  capture_output=True, text=True,
+              )
+              fs_uuid = u_res.stdout.strip()
+              l_res = subprocess.run(
+                  ["sudo", "blkid", "-s", "LABEL", "-o", "value", str(p_img)],
+                  capture_output=True, text=True,
+              )
+              fs_label = l_res.stdout.strip()
 
-          out_img = pdir / "product.new.img"
-          cmd = ["sudo", mkfs_erofs, "-zzstd", "-b", "4096", "-T", "1230768000"]
-          if fs_uuid:
-              cmd += ["-U", fs_uuid]
-          if fs_label:
-              cmd += ["-L", fs_label]
-          cmd += [str(out_img), str(m_rw)]
-          run(cmd)
+              m_ro = Path("/tmp/m_ro")
+              m_rw = Path("/tmp/m_rw")
+              m_ro.mkdir(exist_ok=True)
+              m_rw.mkdir(exist_ok=True)
+              scr = Path("/tmp/scratch_ext4.img")
+              run(["rm", "-f", str(scr)], check=False)
+              run(["truncate", "-s", "900M", str(scr)])
+              run(["mkfs.ext4", "-F", "-q", str(scr)])
+              run(["sudo", "mount", "-t", "erofs", "-o", "loop,ro", str(p_img), str(m_ro)])
+              run(["sudo", "mount", "-o", "loop,rw", str(scr), str(m_rw)])
+              run(["sudo", "rm", "-rf", str(m_rw / "lost+found")])
+              run(["sudo", "cp", "-a", f"{m_ro}/.", f"{m_rw}/"])
 
-          run(["sudo", "umount", str(m_ro)])
-          run(["sudo", "umount", str(m_rw)])
-          run(["rm", "-f", str(scr)], check=False)
-          run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(out_img)])
-          out_img.replace(p_img)
+              rx = subprocess.run(
+                  ["sudo", "getfattr", "--only-values", "-n", "security.selinux", str(m_ro)],
+                  capture_output=True, text=True, check=False,
+              )
+              if rx.returncode == 0 and rx.stdout.strip():
+                  run(["sudo", "setfattr", "-n", "security.selinux", "-v", rx.stdout.strip(), str(m_rw)])
+
+              edit_fn(m_rw)
+
+              out_img = pdir / f"{part_name}.new.img"
+              cmd = ["sudo", mkfs_erofs, "-zzstd", "-b", "4096", "-T", "1230768000"]
+              if fs_uuid:
+                  cmd += ["-U", fs_uuid]
+              if fs_label:
+                  cmd += ["-L", fs_label]
+              cmd += [str(out_img), str(m_rw)]
+              run(cmd)
+
+              run(["sudo", "umount", str(m_ro)])
+              run(["sudo", "umount", str(m_rw)])
+              run(["rm", "-f", str(scr)], check=False)
+              run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(out_img)])
+              out_img.replace(p_img)
+
+          def tune_product(root):
+              safe_apps = (
+                  "ExactCalculator",
+                  "Calculator",
+                  "Etar",
+                  "Calendar",
+                  "Glimpse",
+                  "Gallery2",
+                  "BasicDreams",
+              )
+              for app in safe_apps:
+                  t = root / "app" / app
+                  if t.exists():
+                      run(["sudo", "rm", "-rf", str(t)])
+              props = "\n".join([
+                  "",
+                  "# Proven SmoothLowRAM Base for GB27",
+                  "ro.product.locale=en-US",
+                  "persist.sys.sf.disable_blurs=1",
+                  "ro.surface_flinger.supports_background_blur=0",
+                  "ro.sys.fw.bg_apps_limit=6",
+                  "",
+              ])
+              bp = root / "etc/build.prop"
+              if bp.is_file() and not bp.is_symlink():
+                  pr = subprocess.Popen(
+                      ["sudo", "tee", "-a", str(bp)],
+                      stdin=subprocess.PIPE,
+                      stdout=subprocess.DEVNULL,
+                  )
+                  pr.communicate(props.encode("utf-8"))
+
+          def tune_vendor(root):
+              vbp = root / "build.prop"
+              cat_res = subprocess.run(
+                  ["sudo", "cat", str(vbp)],
+                  capture_output=True, text=True, check=False,
+              )
+              if cat_res.returncode == 0:
+                  (rep_dir / "vendor-build-prop.txt").write_text(
+                      cat_res.stdout, encoding="utf-8"
+                  )
+              drv_out = []
+              for sub in ("lib64/hw", "lib64/egl", "etc/permissions", "etc/init"):
+                  ls_res = subprocess.run(
+                      ["sudo", "ls", "-la", str(root / sub)],
+                      capture_output=True, text=True, check=False,
+                  )
+                  if ls_res.returncode == 0:
+                      drv_out.append(f"=== {sub} ===\n{ls_res.stdout}")
+              (rep_dir / "vendor-drivers.txt").write_text(
+                  "\n".join(drv_out) + "\n", encoding="utf-8"
+              )
+              vprops = "\n".join([
+                  "",
+                  "# Vendor GPU Driver Stability for GB27",
+                  "vendor.mesa.shader.cache.disable=true",
+                  "vendor.mesa.glthread=true",
+                  "ro.vendor.egl.blobcache.multifile=false",
+                  "",
+              ])
+              if cat_res.returncode == 0:
+                  pr = subprocess.Popen(
+                      ["sudo", "tee", "-a", str(vbp)],
+                      stdin=subprocess.PIPE,
+                      stdout=subprocess.DEVNULL,
+                  )
+                  pr.communicate(vprops.encode("utf-8"))
+
+          edit_erofs("product", tune_product)
+          edit_erofs("vendor", tune_vendor)
 
           assembled = Path("/tmp/assembled_out")
           shutil.rmtree(assembled, ignore_errors=True)
@@ -234,15 +259,21 @@ jobs:
               json.dumps(manifest, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          print("SUCCESS! AutoReadyGB27 system.img size:", disk_p.stat().st_size, flush=True)
+          print("SUCCESS! GB27Dedicated system.img size:", disk_p.stat().st_size, flush=True)
 
       - name: Step 4 - Repackage IPA
         run: |
           cd work
-          zip -q -r -y ../AutoReadyGB27-Andarium.ipa Payload
+          zip -q -r -y ../GB27Dedicated-Andarium.ipa Payload
 
-      - name: Step 5 - Upload Auto Ready GB27 IPA
+      - name: Step 5 - Upload GB27 Dedicated IPA
         uses: actions/upload-artifact@v4
         with:
-          name: AutoReadyGB27-Andarium-IPA
-          path: AutoReadyGB27-Andarium.ipa
+          name: GB27Dedicated-Andarium-IPA
+          path: GB27Dedicated-Andarium.ipa
+
+      - name: Step 6 - Upload Vendor Driver Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vendor-Driver-Report
+          path: report/
