@@ -26,11 +26,21 @@ jobs:
           API="https://api.github.com/repos/imxieyi/Kernarium/releases"
           Q='[.[] | .assets[]? | select(.name | endswith(".ipa")) | .browser_download_url][0]'
           IPA_URL=$(curl -sL "$API" | jq -r "$Q")
-          wget -q -O Andarium.ipa "$IPA_URL" || curl -fL -o Andarium.ipa "$IPA_URL"
+          if [ -z "$IPA_URL" ] || [ "$IPA_URL" = "null" ]; then
+            HTML=$(curl -sL "https://github.com/imxieyi/Kernarium/releases")
+            REL=$(echo "$HTML" | grep -oE '/imxieyi/Kernarium/releases/download/[^"]+\.ipa' | head -n 1)
+            if [ -n "$REL" ]; then
+              IPA_URL="https://github.com$REL"
+            else
+              IPA_URL="https://github.com/imxieyi/Kernarium/releases/latest/download/Andarium.ipa"
+            fi
+          fi
+          echo "Downloading IPA from: $IPA_URL"
+          curl -fL --retry 3 -o Andarium.ipa "$IPA_URL" || wget -O Andarium.ipa "$IPA_URL"
           unzip -q -o Andarium.ipa -d work
           exit 0
 
-      - name: Step 3 - Tune Vendor GPU Driver and Proven Product Base for GB27
+      - name: Step 3 - Tune Vendor GPU Driver and Product Base for GB27
         shell: python3 {0}
         run: |
           import json
@@ -49,6 +59,9 @@ jobs:
           def run(cmd, check=True):
               print("+", " ".join(str(x) for x in cmd), flush=True)
               return subprocess.run(cmd, check=check)
+
+          if not disk_p.exists():
+              raise SystemExit("ERROR: Andarium.ipa was not unpacked properly in Step 2")
 
           mkfs_erofs = "mkfs.erofs"
           probe_dir = Path("/tmp/erofs_probe")
@@ -78,6 +91,16 @@ jobs:
               subprocess.run(["make", "-j4"], cwd=src, check=True)
               mkfs_erofs = str((src / "mkfs/mkfs.erofs").resolve())
 
+          zstd_flag = "-zzstd"
+          for cand in ("-zzstd,15", "-zzstd,9"):
+              probe_img.unlink(missing_ok=True)
+              if subprocess.run(
+                  [mkfs_erofs, cand, "-b", "4096", str(probe_img), str(probe_dir)],
+                  capture_output=True, text=True, check=False,
+              ).returncode == 0:
+                  zstd_flag = cand
+                  break
+
           layout = json.loads(layout_p.read_text(encoding="utf-8"))
           manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
           parts = layout["system_disk"]["partitions"]
@@ -98,6 +121,11 @@ jobs:
                               break
                           wf.write(c)
                           rem -= len(c)
+
+          def is_real_file(path_obj):
+              r1 = subprocess.run(["sudo", "test", "-f", str(path_obj)], check=False)
+              r2 = subprocess.run(["sudo", "test", "!", "-L", str(path_obj)], check=False)
+              return r1.returncode == 0 and r2.returncode == 0
 
           def edit_erofs(part_name, edit_fn):
               p_img = pdir / f"{part_name}.img"
@@ -121,11 +149,13 @@ jobs:
 
               m_ro = Path("/tmp/m_ro")
               m_rw = Path("/tmp/m_rw")
+              subprocess.run(["sudo", "umount", str(m_ro)], check=False)
+              subprocess.run(["sudo", "umount", str(m_rw)], check=False)
               m_ro.mkdir(exist_ok=True)
               m_rw.mkdir(exist_ok=True)
               scr = Path("/tmp/scratch_ext4.img")
               run(["rm", "-f", str(scr)], check=False)
-              run(["truncate", "-s", "900M", str(scr)])
+              run(["truncate", "-s", "2500M", str(scr)])
               run(["mkfs.ext4", "-F", "-q", str(scr)])
               run(["sudo", "mount", "-t", "erofs", "-o", "loop,ro", str(p_img), str(m_ro)])
               run(["sudo", "mount", "-o", "loop,rw", str(scr), str(m_rw)])
@@ -142,7 +172,7 @@ jobs:
               edit_fn(m_rw)
 
               out_img = pdir / f"{part_name}.new.img"
-              cmd = ["sudo", mkfs_erofs, "-zzstd", "-b", "4096", "-T", "1230768000"]
+              cmd = ["sudo", mkfs_erofs, zstd_flag, "-b", "4096", "-T", "1230768000"]
               if fs_uuid:
                   cmd += ["-U", fs_uuid]
               if fs_label:
@@ -162,25 +192,38 @@ jobs:
                   "Calculator",
                   "Etar",
                   "Calendar",
+                  "DeskClock",
                   "Glimpse",
                   "Gallery2",
+                  "Aperture",
+                  "Camera2",
+                  "Recorder",
+                  "Eleven",
+                  "Twelve",
+                  "Music",
+                  "Contacts",
+                  "Dialer",
+                  "Messaging",
+                  "Email",
                   "BasicDreams",
+                  "PhotoTable",
               )
               for app in safe_apps:
                   t = root / "app" / app
-                  if t.exists():
+                  if subprocess.run(["sudo", "test", "-e", str(t)], check=False).returncode == 0:
                       run(["sudo", "rm", "-rf", str(t)])
               props = "\n".join([
                   "",
-                  "# Proven SmoothLowRAM Base for GB27",
+                  "# Proven SmoothLowRAM Base + English Locale for GB27",
                   "ro.product.locale=en-US",
+                  "persist.sys.locale=en-US",
                   "persist.sys.sf.disable_blurs=1",
                   "ro.surface_flinger.supports_background_blur=0",
-                  "ro.sys.fw.bg_apps_limit=6",
+                  "ro.sys.fw.bg_apps_limit=8",
                   "",
               ])
               bp = root / "etc/build.prop"
-              if bp.is_file() and not bp.is_symlink():
+              if is_real_file(bp):
                   pr = subprocess.Popen(
                       ["sudo", "tee", "-a", str(bp)],
                       stdin=subprocess.PIPE,
@@ -217,7 +260,7 @@ jobs:
                   "ro.vendor.egl.blobcache.multifile=false",
                   "",
               ])
-              if cat_res.returncode == 0:
+              if is_real_file(vbp):
                   pr = subprocess.Popen(
                       ["sudo", "tee", "-a", str(vbp)],
                       stdin=subprocess.PIPE,
@@ -273,6 +316,7 @@ jobs:
           path: GB27Dedicated-Andarium.ipa
 
       - name: Step 6 - Upload Vendor Driver Report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Vendor-Driver-Report
