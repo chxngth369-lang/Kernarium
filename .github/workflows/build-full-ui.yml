@@ -1,11 +1,11 @@
-name: Build GB27 Dedicated Android IPA
+name: Build GB27 Minimal Game OS IPAs
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-gb27-dedicated:
+  build-gb27-minimal-os:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -38,9 +38,10 @@ jobs:
           echo "Downloading IPA from: $IPA_URL"
           curl -fL --retry 3 -o Andarium.ipa "$IPA_URL" || wget -O Andarium.ipa "$IPA_URL"
           unzip -q -o Andarium.ipa -d work
+          rm -f Andarium.ipa
           exit 0
 
-      - name: Step 3 - Tune Vendor GPU Driver and Product Base for GB27
+      - name: Step 3 - Build Minimal GB27 Game-Only Android Editions
         shell: python3 {0}
         run: |
           import json
@@ -53,8 +54,6 @@ jobs:
           layout_p = bsys / "guest/partition-layout.json"
           manifest_p = bsys / "release-manifest.json"
           disk_p = bsys / "guest/system.img"
-          rep_dir = Path("report")
-          rep_dir.mkdir(exist_ok=True)
 
           def run(cmd, check=True):
               print("+", " ".join(str(x) for x in cmd), flush=True)
@@ -102,16 +101,16 @@ jobs:
                   break
 
           layout = json.loads(layout_p.read_text(encoding="utf-8"))
-          manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
+          orig_manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
           parts = layout["system_disk"]["partitions"]
 
-          pdir = Path("/tmp/gpt_parts")
-          shutil.rmtree(pdir, ignore_errors=True)
-          pdir.mkdir(parents=True, exist_ok=True)
+          base_parts = Path("/tmp/base_parts")
+          shutil.rmtree(base_parts, ignore_errors=True)
+          base_parts.mkdir(parents=True, exist_ok=True)
 
           with disk_p.open("rb") as df:
               for p in parts:
-                  out = pdir / (p["name"] + ".img")
+                  out = base_parts / (p["name"] + ".img")
                   df.seek(p["start_bytes"])
                   rem = p["size_bytes"]
                   with out.open("wb") as wf:
@@ -127,22 +126,14 @@ jobs:
               r2 = subprocess.run(["sudo", "test", "!", "-L", str(path_obj)], check=False)
               return r1.returncode == 0 and r2.returncode == 0
 
-          def edit_erofs(part_name, edit_fn):
-              p_img = pdir / f"{part_name}.img"
-              t_res = subprocess.run(
-                  ["sudo", "blkid", "-s", "TYPE", "-o", "value", str(p_img)],
-                  capture_output=True, text=True,
-              )
-              if t_res.stdout.strip() != "erofs":
-                  print(f"Skipping {part_name}: type={t_res.stdout.strip()}", flush=True)
-                  return
+          def edit_erofs_image(src_img: Path, dst_img: Path, edit_fn):
               u_res = subprocess.run(
-                  ["sudo", "blkid", "-s", "UUID", "-o", "value", str(p_img)],
+                  ["sudo", "blkid", "-s", "UUID", "-o", "value", str(src_img)],
                   capture_output=True, text=True,
               )
               fs_uuid = u_res.stdout.strip()
               l_res = subprocess.run(
-                  ["sudo", "blkid", "-s", "LABEL", "-o", "value", str(p_img)],
+                  ["sudo", "blkid", "-s", "LABEL", "-o", "value", str(src_img)],
                   capture_output=True, text=True,
               )
               fs_label = l_res.stdout.strip()
@@ -157,7 +148,7 @@ jobs:
               run(["rm", "-f", str(scr)], check=False)
               run(["truncate", "-s", "2500M", str(scr)])
               run(["mkfs.ext4", "-F", "-q", str(scr)])
-              run(["sudo", "mount", "-t", "erofs", "-o", "loop,ro", str(p_img), str(m_ro)])
+              run(["sudo", "mount", "-t", "erofs", "-o", "loop,ro", str(src_img), str(m_ro)])
               run(["sudo", "mount", "-o", "loop,rw", str(scr), str(m_rw)])
               run(["sudo", "rm", "-rf", str(m_rw / "lost+found")])
               run(["sudo", "cp", "-a", f"{m_ro}/.", f"{m_rw}/"])
@@ -171,23 +162,23 @@ jobs:
 
               edit_fn(m_rw)
 
-              out_img = pdir / f"{part_name}.new.img"
+              dst_img.unlink(missing_ok=True)
               cmd = ["sudo", mkfs_erofs, zstd_flag, "-b", "4096", "-T", "1230768000"]
               if fs_uuid:
                   cmd += ["-U", fs_uuid]
               if fs_label:
                   cmd += ["-L", fs_label]
-              cmd += [str(out_img), str(m_rw)]
+              cmd += [str(dst_img), str(m_rw)]
               run(cmd)
 
               run(["sudo", "umount", str(m_ro)])
               run(["sudo", "umount", str(m_rw)])
               run(["rm", "-f", str(scr)], check=False)
-              run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(out_img)])
-              out_img.replace(p_img)
+              run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(dst_img)])
 
-          def tune_product(root):
-              safe_apps = (
+          def tune_minimal_product(root):
+              # Keep ONLY Settings, Files, and Keyboard; remove all other user apps and media
+              bloat_apps = (
                   "ExactCalculator",
                   "Calculator",
                   "Etar",
@@ -207,19 +198,28 @@ jobs:
                   "Email",
                   "BasicDreams",
                   "PhotoTable",
+                  "Jelly",
+                  "Browser2",
               )
-              for app in safe_apps:
+              for app in bloat_apps:
                   t = root / "app" / app
                   if subprocess.run(["sudo", "test", "-e", str(t)], check=False).returncode == 0:
                       run(["sudo", "rm", "-rf", str(t)])
+
+              for media_sub in ("media/audio/ringtones", "media/audio/alarms"):
+                  ms = root / media_sub
+                  if subprocess.run(["sudo", "test", "-e", str(ms)], check=False).returncode == 0:
+                      run(["sudo", "rm", "-rf", str(ms)])
+
               props = "\n".join([
                   "",
-                  "# Proven SmoothLowRAM Base + English Locale for GB27",
+                  "# Dedicated Minimal GB27 Appliance Props",
                   "ro.product.locale=en-US",
                   "persist.sys.locale=en-US",
                   "persist.sys.sf.disable_blurs=1",
-                  "ro.surface_flinger.supports_background_blur=0",
-                  "ro.sys.fw.bg_apps_limit=8",
+                  "ro.launcher.blur.appLaunch=0",
+                  "ro.sys.fw.bg_apps_limit=4",
+                  "persist.traced.enable=0",
                   "",
               ])
               bp = root / "etc/build.prop"
@@ -231,93 +231,144 @@ jobs:
                   )
                   pr.communicate(props.encode("utf-8"))
 
-          def tune_vendor(root):
-              vbp = root / "build.prop"
-              cat_res = subprocess.run(
-                  ["sudo", "cat", str(vbp)],
-                  capture_output=True, text=True, check=False,
-              )
-              if cat_res.returncode == 0:
-                  (rep_dir / "vendor-build-prop.txt").write_text(
-                      cat_res.stdout, encoding="utf-8"
-                  )
-              drv_out = []
-              for sub in ("lib64/hw", "lib64/egl", "etc/permissions", "etc/init"):
-                  ls_res = subprocess.run(
-                      ["sudo", "ls", "-la", str(root / sub)],
+          def make_vendor_editor(force_app_gles3: bool):
+              def _edit(root):
+                  # Disable broken virtual V4L2 video service & self-test
+                  for rc_name in (
+                      "android.hardware.media.c2-service-v4l2.rc",
+                      "boringssl_self_test.rc",
+                  ):
+                      rc_p = root / "etc/init" / rc_name
+                      if subprocess.run(["sudo", "test", "-e", str(rc_p)], check=False).returncode == 0:
+                          run(["sudo", "rm", "-f", str(rc_p)])
+
+                  if force_app_gles3:
+                      # Restrict vulkan.virtio.so to UID 1000 (SurfaceFlinger) so Android 17 boots 100%
+                      # while user apps (UID 10000+, like GB27) cleanly fall back to libGLESv2_kernarium.so!
+                      vk_so = root / "lib64/hw/vulkan.virtio.so"
+                      if subprocess.run(["sudo", "test", "-e", str(vk_so)], check=False).returncode == 0:
+                          run(["sudo", "chown", "1000:1000", str(vk_so)])
+                          run(["sudo", "chmod", "0600", str(vk_so)])
+                      for xml_name in (
+                          "android.hardware.vulkan.compute-0.xml",
+                          "android.hardware.vulkan.level-1.xml",
+                          "android.hardware.vulkan.version-1_4.xml",
+                      ):
+                          xp = root / "etc/permissions" / xml_name
+                          if subprocess.run(["sudo", "test", "-e", str(xp)], check=False).returncode == 0:
+                              run(["sudo", "rm", "-f", str(xp)])
+
+                  vbp = root / "build.prop"
+                  cat_res = subprocess.run(
+                      ["sudo", "cat", str(vbp)],
                       capture_output=True, text=True, check=False,
                   )
-                  if ls_res.returncode == 0:
-                      drv_out.append(f"=== {sub} ===\n{ls_res.stdout}")
-              (rep_dir / "vendor-drivers.txt").write_text(
-                  "\n".join(drv_out) + "\n", encoding="utf-8"
-              )
-              vprops = "\n".join([
-                  "",
-                  "# Vendor GPU Driver Stability for GB27",
-                  "vendor.mesa.shader.cache.disable=true",
-                  "vendor.mesa.glthread=true",
-                  "ro.vendor.egl.blobcache.multifile=false",
-                  "",
-              ])
-              if is_real_file(vbp):
-                  pr = subprocess.Popen(
-                      ["sudo", "tee", "-a", str(vbp)],
-                      stdin=subprocess.PIPE,
-                      stdout=subprocess.DEVNULL,
-                  )
-                  pr.communicate(vprops.encode("utf-8"))
+                  if cat_res.returncode == 0 and is_real_file(vbp):
+                      replacements = {
+                          "ro.surface_flinger.supports_background_blur=1": "ro.surface_flinger.supports_background_blur=0",
+                          "ro.vendor.v4l2_codec2.decoder.supported.h264=true": "ro.vendor.v4l2_codec2.decoder.supported.h264=false",
+                          "ro.vendor.v4l2_codec2.decoder.supported.hevc=true": "ro.vendor.v4l2_codec2.decoder.supported.hevc=false",
+                          "ro.vendor.v4l2_codec2.encoder.supported.h264=true": "ro.vendor.v4l2_codec2.encoder.supported.h264=false",
+                          "ro.vendor.v4l2_codec2.encoder.supported.hevc=true": "ro.vendor.v4l2_codec2.encoder.supported.hevc=false",
+                          "ro.vendor.fingerprint_virtual_hal_start=true": "ro.vendor.fingerprint_virtual_hal_start=false",
+                          "ro.camerax.extensions.enabled=true": "ro.camerax.extensions.enabled=false",
+                          "drm.service.enabled=true": "drm.service.enabled=false",
+                          "bluetooth.profile.bap.unicast.client.enabled=true": "bluetooth.profile.bap.unicast.client.enabled=false",
+                          "bluetooth.profile.bas.client.enabled=true": "bluetooth.profile.bas.client.enabled=false",
+                          "bluetooth.profile.ccp.server.enabled=true": "bluetooth.profile.ccp.server.enabled=false",
+                          "bluetooth.profile.csip.set_coordinator.enabled=true": "bluetooth.profile.csip.set_coordinator.enabled=false",
+                          "bluetooth.profile.hap.client.enabled=true": "bluetooth.profile.hap.client.enabled=false",
+                          "bluetooth.profile.mcp.server.enabled=true": "bluetooth.profile.mcp.server.enabled=false",
+                          "bluetooth.profile.vcp.controller.enabled=true": "bluetooth.profile.vcp.controller.enabled=false",
+                      }
+                      new_lines = []
+                      for line in cat_res.stdout.splitlines():
+                          s = line.strip()
+                          new_lines.append(replacements.get(s, line))
+                      new_lines += [
+                          "",
+                          "# Dedicated GB27 Vendor Media & Graphics",
+                          "ro.egl.blobcache.multifile=false",
+                          "",
+                      ]
+                      patched_text = "\n".join(new_lines) + "\n"
+                      pr = subprocess.Popen(
+                          ["sudo", "tee", str(vbp)],
+                          stdin=subprocess.PIPE,
+                          stdout=subprocess.DEVNULL,
+                      )
+                      pr.communicate(patched_text.encode("utf-8"))
+              return _edit
 
-          edit_erofs("product", tune_product)
-          edit_erofs("vendor", tune_vendor)
+          # Build shared minimal product.img once
+          edit_erofs_image(base_parts / "product.img", base_parts / "product.min.img", tune_minimal_product)
+          (base_parts / "product.min.img").replace(base_parts / "product.img")
 
-          assembled = Path("/tmp/assembled_out")
-          shutil.rmtree(assembled, ignore_errors=True)
           ubd_tool = Path("upstream/android/lineage-24/tools/ubd-disk.py").resolve()
           policy_p = Path("upstream/android/lineage-24/support/image/disk-policy.json").resolve()
 
-          run([
-              "python3", str(ubd_tool), "assemble",
-              "--policy", str(policy_p),
-              "--images-dir", str(pdir.resolve()),
-              "--output-dir", str(assembled.resolve()),
-          ])
-          run([
-              "python3", str(ubd_tool), "verify",
-              "--layout", str((assembled / "partition-layout.json").resolve()),
-              "--disk", str((assembled / "system.img").resolve()),
-              "--hash",
-              "--policy", str(policy_p),
-          ])
+          def build_ipa_variant(variant_name: str, force_app_gles3: bool, out_ipa: Path):
+              vdir = Path(f"/tmp/parts_{variant_name}")
+              shutil.rmtree(vdir, ignore_errors=True)
+              shutil.copytree(base_parts, vdir)
 
-          shutil.copyfile(assembled / "system.img", disk_p)
-          shutil.copyfile(assembled / "partition-layout.json", layout_p)
+              edit_erofs_image(
+                  vdir / "vendor.img",
+                  vdir / "vendor.new.img",
+                  make_vendor_editor(force_app_gles3),
+              )
+              (vdir / "vendor.new.img").replace(vdir / "vendor.img")
 
-          for item in manifest["inventory"]:
-              rel = item.get("path")
-              if rel in ("boot/kernel-command-line.txt", "guest/partition-layout.json", "guest/system.img"):
-                  item["size"] = (bsys / rel).stat().st_size
+              assembled = Path(f"/tmp/assembled_{variant_name}")
+              shutil.rmtree(assembled, ignore_errors=True)
+              run([
+                  "python3", str(ubd_tool), "assemble",
+                  "--policy", str(policy_p),
+                  "--images-dir", str(vdir.resolve()),
+                  "--output-dir", str(assembled.resolve()),
+              ])
+              run([
+                  "python3", str(ubd_tool), "verify",
+                  "--layout", str((assembled / "partition-layout.json").resolve()),
+                  "--disk", str((assembled / "system.img").resolve()),
+                  "--hash",
+                  "--policy", str(policy_p),
+              ])
 
-          manifest_p.write_text(
-              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          print("SUCCESS! GB27Dedicated system.img size:", disk_p.stat().st_size, flush=True)
+              shutil.copyfile(assembled / "system.img", disk_p)
+              shutil.copyfile(assembled / "partition-layout.json", layout_p)
 
-      - name: Step 4 - Repackage IPA
-        run: |
-          cd work
-          zip -q -r -y ../GB27Dedicated-Andarium.ipa Payload
+              manifest = json.loads(json.dumps(orig_manifest))
+              for item in manifest["inventory"]:
+                  rel = item.get("path")
+                  if rel in ("boot/kernel-command-line.txt", "guest/partition-layout.json", "guest/system.img"):
+                      item["size"] = (bsys / rel).stat().st_size
+              manifest_p.write_text(
+                  json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                  encoding="utf-8",
+              )
 
-      - name: Step 5 - Upload GB27 Dedicated IPA
+              out_ipa.unlink(missing_ok=True)
+              subprocess.run(
+                  ["zip", "-q", "-r", "-y", str(out_ipa.resolve()), "Payload"],
+                  cwd="work",
+                  check=True,
+              )
+              shutil.rmtree(vdir, ignore_errors=True)
+              shutil.rmtree(assembled, ignore_errors=True)
+              print(f"BUILT {out_ipa.name} successfully!", flush=True)
+
+          build_ipa_variant("gles3", True, Path("GB27-Only-OpenGLES3.ipa"))
+          build_ipa_variant("vkfix", False, Path("GB27-Only-VulkanMediaFix.ipa"))
+
+      - name: Step 4 - Upload GB27 Only OpenGLES3 IPA (Recommended)
         uses: actions/upload-artifact@v4
         with:
-          name: GB27Dedicated-Andarium-IPA
-          path: GB27Dedicated-Andarium.ipa
+          name: 1-GB27-Only-OpenGLES3-IPA
+          path: GB27-Only-OpenGLES3.ipa
 
-      - name: Step 6 - Upload Vendor Driver Report
-        if: always()
+      - name: Step 5 - Upload GB27 Only VulkanMediaFix IPA (Backup)
         uses: actions/upload-artifact@v4
         with:
-          name: Vendor-Driver-Report
-          path: report/
+          name: 2-GB27-Only-VulkanMediaFix-IPA
+          path: GB27-Only-VulkanMediaFix.ipa
