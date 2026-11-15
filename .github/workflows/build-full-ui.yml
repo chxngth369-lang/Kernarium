@@ -1,11 +1,11 @@
-name: Build GB27 Stable LowMem V2 IPA
+name: Build GB27 Console UltraLite IPA
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  build-gb27-stable-lowmem-v2:
+  build-gb27-console:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Upstream Tools
@@ -18,7 +18,7 @@ jobs:
         run: |
           set +e
           sudo apt-get update -y
-          sudo apt-get install -y e2fsprogs erofs-utils attr util-linux unzip zip wget curl jq
+          sudo apt-get install -y e2fsprogs erofs-utils attr util-linux unzip zip wget curl jq default-jdk-headless
           sudo apt-get install -y build-essential autoconf automake libtool pkg-config libzstd-dev liblz4-dev uuid-dev
           sudo modprobe erofs || true
 
@@ -35,15 +35,15 @@ jobs:
               IPA_URL="https://github.com/imxieyi/Kernarium/releases/latest/download/Andarium.ipa"
             fi
           fi
-          echo "Downloading IPA from: $IPA_URL"
           curl -fL --retry 3 -o Andarium.ipa "$IPA_URL" || wget -O Andarium.ipa "$IPA_URL"
           unzip -q -o Andarium.ipa -d work
           rm -f Andarium.ipa
           exit 0
 
-      - name: Step 3 - Build Stable LowMem V2 OpenGLES3 OS for GB27
+      - name: Step 3 - Build GB27 Console APK and UltraLite Android Image
         shell: python3 {0}
         run: |
+          import glob
           import json
           import os
           import shutil
@@ -55,71 +55,337 @@ jobs:
           manifest_p = bsys / "release-manifest.json"
           disk_p = bsys / "guest/system.img"
 
-          def run(cmd, check=True):
+          def run(cmd, check=True, cwd=None):
               print("+", " ".join(str(x) for x in cmd), flush=True)
-              return subprocess.run(cmd, check=check)
+              return subprocess.run(cmd, check=check, cwd=cwd)
 
           if not disk_p.exists():
-              raise SystemExit("ERROR: Andarium.ipa was not unpacked properly in Step 2")
+              raise SystemExit("ERROR: Andarium.ipa unpack failed")
+
+          sdk_candidates = [
+              os.environ.get("ANDROID_HOME", ""),
+              os.environ.get("ANDROID_SDK_ROOT", ""),
+              "/usr/local/lib/android/sdk",
+              "/usr/lib/android-sdk",
+          ]
+          sdk_root = next((Path(p) for p in sdk_candidates if p and Path(p).exists()), None)
+          if not sdk_root:
+              raise SystemExit("ERROR: Android SDK not found")
+
+          bt = Path(sorted(glob.glob(str(sdk_root / "build-tools/*")))[-1])
+          android_jar = Path(sorted(glob.glob(str(sdk_root / "platforms/android-*")))[-1]) / "android.jar"
+
+          apk_work = Path("/tmp/gb27_console")
+          shutil.rmtree(apk_work, ignore_errors=True)
+          (apk_work / "src/app/gb27/console").mkdir(parents=True, exist_ok=True)
+          (apk_work / "res/values").mkdir(parents=True, exist_ok=True)
+          (apk_work / "classes").mkdir(parents=True, exist_ok=True)
+
+          (apk_work / "AndroidManifest.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="app.gb27.console"
+              android:versionCode="1"
+              android:versionName="1.0">
+              <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
+              <uses-permission android:name="android.permission.SET_WALLPAPER" />
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+              <application
+                  android:label="GB27 Console"
+                  android:hardwareAccelerated="false"
+                  android:allowBackup="false">
+                  <activity
+                      android:name="app.gb27.console.ConsoleActivity"
+                      android:label="GB27 Console"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:stateNotNeeded="true"
+                      android:excludeFromRecents="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:theme="@android:style/Theme.NoTitleBar">
+                      <intent-filter priority="999">
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          """.strip() + "\n", encoding="utf-8")
+
+          (apk_work / "res/values/strings.xml").write_text(
+              '<?xml version="1.0" encoding="utf-8"?>\n<resources><string name="app_name">GB27 Console</string></resources>\n',
+              encoding="utf-8",
+          )
+
+          (apk_work / "src/app/gb27/console/ConsoleActivity.java").write_text(r'''package app.gb27.console;
+
+          import android.app.Activity;
+          import android.app.ActivityManager;
+          import android.app.WallpaperManager;
+          import android.content.ComponentName;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.ApplicationInfo;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.util.TypedValue;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import java.util.List;
+
+          public class ConsoleActivity extends Activity {
+              private TextView statusView;
+              private Intent gameIntent;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  clearHeavyWallpaperOnce();
+                  setupUi();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  overridePendingTransition(0, 0);
+                  detectGameAndRam();
+              }
+
+              private void clearHeavyWallpaperOnce() {
+                  try {
+                      SharedPreferences sp = getSharedPreferences("c", MODE_PRIVATE);
+                      if (!sp.getBoolean("w", false)) {
+                          Bitmap b = Bitmap.createBitmap(2, 2, Bitmap.Config.RGB_565);
+                          b.eraseColor(Color.BLACK);
+                          WallpaperManager.getInstance(this).setBitmap(b);
+                          sp.edit().putBoolean("w", true).apply();
+                      }
+                  } catch (Throwable ignored) {}
+              }
+
+              private int dp(int v) {
+                  return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics());
+              }
+
+              private Button btn(String label, String hexBg, int spSize, int padV) {
+                  Button b = new Button(this);
+                  b.setAllCaps(false);
+                  b.setText(label);
+                  b.setTextColor(Color.WHITE);
+                  b.setTextSize(TypedValue.COMPLEX_UNIT_SP, spSize);
+                  b.setTypeface(Typeface.DEFAULT_BOLD);
+                  GradientDrawable gd = new GradientDrawable();
+                  gd.setColor(Color.parseColor(hexBg));
+                  gd.setCornerRadius(dp(12));
+                  gd.setStroke(dp(1), Color.parseColor("#2B3242"));
+                  b.setBackground(gd);
+                  b.setPadding(dp(18), dp(padV), dp(18), dp(padV));
+                  return b;
+              }
+
+              private void setupUi() {
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setGravity(Gravity.CENTER);
+                  root.setBackgroundColor(Color.BLACK);
+                  root.setPadding(dp(24), dp(20), dp(24), dp(20));
+
+                  TextView header = new TextView(this);
+                  header.setText("GB27 ULTRA-LITE CONSOLE");
+                  header.setTextColor(Color.WHITE);
+                  header.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+                  header.setTypeface(Typeface.DEFAULT_BOLD);
+                  header.setGravity(Gravity.CENTER);
+                  root.addView(header);
+
+                  statusView = new TextView(this);
+                  statusView.setTextColor(Color.parseColor("#9CA3AF"));
+                  statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+                  statusView.setGravity(Gravity.CENTER);
+                  statusView.setPadding(0, dp(8), 0, dp(20));
+                  root.addView(statusView);
+
+                  LinearLayout.LayoutParams mainLp = new LinearLayout.LayoutParams(dp(400), LinearLayout.LayoutParams.WRAP_CONTENT);
+                  mainLp.bottomMargin = dp(12);
+                  Button runBtn = btn("▶  RUN GB27 NOW", "#DC2626", 18, 16);
+                  runBtn.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          System.gc();
+                          if (gameIntent != null) {
+                              gameIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                              startActivity(gameIntent);
+                              overridePendingTransition(0, 0);
+                          } else {
+                              launchPkg("com.android.documentsui");
+                          }
+                      }
+                  });
+                  root.addView(runBtn, mainLp);
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  row.setGravity(Gravity.CENTER);
+
+                  LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(dp(194), LinearLayout.LayoutParams.WRAP_CONTENT);
+                  lp1.rightMargin = dp(12);
+                  Button filesBtn = btn("📁 Files / APK", "#151A24", 14, 12);
+                  filesBtn.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) { launchPkg("com.android.documentsui"); }
+                  });
+                  row.addView(filesBtn, lp1);
+
+                  LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(dp(194), LinearLayout.LayoutParams.WRAP_CONTENT);
+                  Button setBtn = btn("⚙️ Settings / Anim", "#151A24", 14, 12);
+                  setBtn.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          try {
+                              int d = Settings.Global.getInt(getContentResolver(), Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0);
+                              Intent i = new Intent(d == 1 ? Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS : Settings.ACTION_SETTINGS);
+                              i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                              startActivity(i);
+                              overridePendingTransition(0, 0);
+                          } catch (Throwable t) { launchPkg("com.android.settings"); }
+                      }
+                  });
+                  row.addView(setBtn, lp2);
+
+                  root.addView(row);
+                  setContentView(root);
+              }
+
+              private void launchPkg(String pkg) {
+                  try {
+                      Intent i = getPackageManager().getLaunchIntentForPackage(pkg);
+                      if (i == null) i = new Intent(Settings.ACTION_SETTINGS);
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                      startActivity(i);
+                      overridePendingTransition(0, 0);
+                  } catch (Throwable ignored) {}
+              }
+
+              private void detectGameAndRam() {
+                  gameIntent = null;
+                  String foundName = null;
+                  try {
+                      PackageManager pm = getPackageManager();
+                      Intent q = new Intent(Intent.ACTION_MAIN);
+                      q.addCategory(Intent.CATEGORY_LAUNCHER);
+                      List<ResolveInfo> apps = pm.queryIntentActivities(q, 0);
+                      ResolveInfo userFallback = null;
+                      for (ResolveInfo ri : apps) {
+                          if (ri.activityInfo == null) continue;
+                          String pkg = ri.activityInfo.packageName;
+                          if (pkg == null || pkg.equals(getPackageName())) continue;
+                          String lbl = String.valueOf(ri.loadLabel(pm));
+                          String key = (pkg + " " + lbl).toLowerCase();
+                          if (key.contains("gb27") || key.contains("f2games") || key.contains("gbde")) {
+                              foundName = lbl;
+                              Intent li = new Intent(Intent.ACTION_MAIN);
+                              li.addCategory(Intent.CATEGORY_LAUNCHER);
+                              li.setComponent(new ComponentName(pkg, ri.activityInfo.name));
+                              gameIntent = li;
+                              break;
+                          }
+                          if ((ri.activityInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) == 0 && userFallback == null) {
+                              userFallback = ri;
+                          }
+                      }
+                      if (gameIntent == null && userFallback != null) {
+                          String pkg = userFallback.activityInfo.packageName;
+                          foundName = String.valueOf(userFallback.loadLabel(pm));
+                          Intent li = new Intent(Intent.ACTION_MAIN);
+                          li.addCategory(Intent.CATEGORY_LAUNCHER);
+                          li.setComponent(new ComponentName(pkg, userFallback.activityInfo.name));
+                          gameIntent = li;
+                      }
+                  } catch (Throwable ignored) {}
+
+                  String ramText = "";
+                  ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                  if (am != null) {
+                      ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                      am.getMemoryInfo(mi);
+                      ramText = "  |  Free RAM: " + (mi.availMem / 1048576L) + " / " + (mi.totalMem / 1048576L) + " MB";
+                  }
+                  if (gameIntent != null) {
+                      statusView.setText("READY: " + foundName + ramText);
+                      statusView.setTextColor(Color.parseColor("#34D399"));
+                  } else {
+                      statusView.setText("Install GB27 APK first" + ramText);
+                      statusView.setTextColor(Color.parseColor("#FBBF24"));
+                  }
+              }
+          }
+          ''', encoding="utf-8")
+
+          run([str(bt / "aapt2"), "compile", "--dir", str(apk_work / "res"), "-o", str(apk_work / "res.zip")])
+          run([
+              str(bt / "aapt2"), "link", "-I", str(android_jar),
+              "--manifest", str(apk_work / "AndroidManifest.xml"),
+              "--java", str(apk_work / "src"),
+              "-o", str(apk_work / "unaligned.apk"),
+              str(apk_work / "res.zip"),
+          ])
+          j_files = [str(p) for p in (apk_work / "src").rglob("*.java")]
+          run(["javac", "--release", "11", "-cp", str(android_jar), "-d", str(apk_work / "classes"), *j_files])
+          c_files = [str(p) for p in (apk_work / "classes").rglob("*.class")]
+          run([str(bt / "d8"), "--lib", str(android_jar), "--min-api", "29", "--output", str(apk_work), *c_files])
+          run(["zip", "-q", "-j", str(apk_work / "unaligned.apk"), str(apk_work / "classes.dex")])
+          run([str(bt / "zipalign"), "-p", "-f", "4", str(apk_work / "unaligned.apk"), str(apk_work / "aligned.apk")])
+          ks = apk_work / "k.jks"
+          run([
+              "keytool", "-genkeypair", "-keystore", str(ks),
+              "-storepass", "android", "-keypass", "android", "-alias", "k",
+              "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+              "-dname", "CN=Console,O=Android,C=US",
+          ])
+          console_apk = apk_work / "GB27Console.apk"
+          run([
+              str(bt / "apksigner"), "sign", "--ks", str(ks),
+              "--ks-pass", "pass:android", "--key-pass", "pass:android",
+              "--v1-signing-enabled", "true", "--v2-signing-enabled", "true", "--v3-signing-enabled", "true",
+              "--out", str(console_apk), str(apk_work / "aligned.apk"),
+          ])
 
           mkfs_erofs = "mkfs.erofs"
           probe_dir = Path("/tmp/erofs_probe")
           probe_dir.mkdir(exist_ok=True)
           (probe_dir / "t.txt").write_text("ok", encoding="utf-8")
           probe_img = Path("/tmp/probe.erofs")
-          probe_img.unlink(missing_ok=True)
-          pr_test = subprocess.run(
-              [mkfs_erofs, "-zzstd", "-b", "4096", str(probe_img), str(probe_dir)],
-              capture_output=True, text=True, check=False,
-          )
-          if pr_test.returncode != 0:
-              src = Path("/tmp/erofs-src")
-              shutil.rmtree(src, ignore_errors=True)
-              r1 = subprocess.run([
-                  "git", "clone", "--depth", "1",
-                  "https://github.com/erofs/erofs-utils.git", str(src),
-              ])
-              if r1.returncode != 0:
-                  run([
-                      "git", "clone", "--depth", "1",
-                      "https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git",
-                      str(src),
-                  ])
-              subprocess.run(["./autogen.sh"], cwd=src, check=True)
-              subprocess.run(["./configure", "--enable-lz4", "--with-libzstd"], cwd=src, check=True)
-              subprocess.run(["make", "-j4"], cwd=src, check=True)
-              mkfs_erofs = str((src / "mkfs/mkfs.erofs").resolve())
-
           zstd_flag = "-zzstd"
           for cand in ("-zzstd,15", "-zzstd,9"):
               probe_img.unlink(missing_ok=True)
-              if subprocess.run(
-                  [mkfs_erofs, cand, "-b", "4096", str(probe_img), str(probe_dir)],
-                  capture_output=True, text=True, check=False,
-              ).returncode == 0:
+              if subprocess.run([mkfs_erofs, cand, "-b", "4096", str(probe_img), str(probe_dir)], capture_output=True).returncode == 0:
                   zstd_flag = cand
-                  break
-
-          lz4_flag = None
-          for cand in ("-zlz4hc,9", "-zlz4hc"):
-              probe_img.unlink(missing_ok=True)
-              if subprocess.run(
-                  [mkfs_erofs, cand, "-b", "4096", str(probe_img), str(probe_dir)],
-                  capture_output=True, text=True, check=False,
-              ).returncode == 0:
-                  lz4_flag = cand
                   break
 
           layout = json.loads(layout_p.read_text(encoding="utf-8"))
           manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
-          parts = layout["system_disk"]["partitions"]
-
           pdir = Path("/tmp/gpt_parts")
           shutil.rmtree(pdir, ignore_errors=True)
           pdir.mkdir(parents=True, exist_ok=True)
 
           with disk_p.open("rb") as df:
-              for p in parts:
+              for p in layout["system_disk"]["partitions"]:
                   out = pdir / (p["name"] + ".img")
                   df.seek(p["start_bytes"])
                   rem = p["size_bytes"]
@@ -132,29 +398,22 @@ jobs:
                           rem -= len(c)
 
           def is_real_file(path_obj):
-              r1 = subprocess.run(["sudo", "test", "-f", str(path_obj)], check=False)
-              r2 = subprocess.run(["sudo", "test", "!", "-L", str(path_obj)], check=False)
-              return r1.returncode == 0 and r2.returncode == 0
-
-          def edit_erofs_image(src_img: Path, dst_img: Path, edit_fn, comp_flag: str):
-              u_res = subprocess.run(
-                  ["sudo", "blkid", "-s", "UUID", "-o", "value", str(src_img)],
-                  capture_output=True, text=True,
+              return (
+                  subprocess.run(["sudo", "test", "-f", str(path_obj)], check=False).returncode == 0
+                  and subprocess.run(["sudo", "test", "!", "-L", str(path_obj)], check=False).returncode == 0
               )
-              fs_uuid = u_res.stdout.strip()
-              l_res = subprocess.run(
-                  ["sudo", "blkid", "-s", "LABEL", "-o", "value", str(src_img)],
-                  capture_output=True, text=True,
-              )
-              fs_label = l_res.stdout.strip()
 
-              m_ro = Path("/tmp/m_ro")
-              m_rw = Path("/tmp/m_rw")
+          def edit_erofs(part_name, edit_fn):
+              src_img = pdir / f"{part_name}.img"
+              dst_img = pdir / f"{part_name}.new.img"
+              fs_uuid = subprocess.run(["sudo", "blkid", "-s", "UUID", "-o", "value", str(src_img)], capture_output=True, text=True).stdout.strip()
+              fs_label = subprocess.run(["sudo", "blkid", "-s", "LABEL", "-o", "value", str(src_img)], capture_output=True, text=True).stdout.strip()
+
+              m_ro, m_rw, scr = Path("/tmp/m_ro"), Path("/tmp/m_rw"), Path("/tmp/scr.img")
               subprocess.run(["sudo", "umount", str(m_ro)], check=False)
               subprocess.run(["sudo", "umount", str(m_rw)], check=False)
               m_ro.mkdir(exist_ok=True)
               m_rw.mkdir(exist_ok=True)
-              scr = Path("/tmp/scratch_ext4.img")
               run(["rm", "-f", str(scr)], check=False)
               run(["truncate", "-s", "2500M", str(scr)])
               run(["mkfs.ext4", "-F", "-q", str(scr)])
@@ -163,76 +422,67 @@ jobs:
               run(["sudo", "rm", "-rf", str(m_rw / "lost+found")])
               run(["sudo", "cp", "-a", f"{m_ro}/.", f"{m_rw}/"])
 
-              rx = subprocess.run(
-                  ["sudo", "getfattr", "--only-values", "-n", "security.selinux", str(m_ro)],
-                  capture_output=True, text=True, check=False,
-              )
+              rx = subprocess.run(["sudo", "getfattr", "--only-values", "-n", "security.selinux", str(m_ro)], capture_output=True, text=True, check=False)
               if rx.returncode == 0 and rx.stdout.strip():
                   run(["sudo", "setfattr", "-n", "security.selinux", "-v", rx.stdout.strip(), str(m_rw)])
 
               edit_fn(m_rw)
 
               dst_img.unlink(missing_ok=True)
-              cmd = ["sudo", mkfs_erofs, comp_flag, "-b", "4096", "-T", "1230768000"]
+              cmd = ["sudo", mkfs_erofs, zstd_flag, "-b", "4096", "-T", "1230768000"]
               if fs_uuid:
                   cmd += ["-U", fs_uuid]
               if fs_label:
                   cmd += ["-L", fs_label]
               cmd += [str(dst_img), str(m_rw)]
               run(cmd)
-
               run(["sudo", "umount", str(m_ro)])
               run(["sudo", "umount", str(m_rw)])
               run(["rm", "-f", str(scr)], check=False)
               run(["sudo", "chown", f"{os.getuid()}:{os.getgid()}", str(dst_img)])
+              dst_img.replace(src_img)
 
-          def tune_stable_product(root):
-              bloat_apps = (
-                  "ExactCalculator",
-                  "Calculator",
-                  "Etar",
-                  "Calendar",
-                  "DeskClock",
-                  "Glimpse",
-                  "Gallery2",
-                  "Aperture",
-                  "Camera2",
-                  "Recorder",
-                  "Eleven",
-                  "Twelve",
-                  "Music",
-                  "Contacts",
-                  "Dialer",
-                  "Messaging",
-                  "Email",
-                  "BasicDreams",
-                  "PhotoTable",
-                  "Jelly",
-                  "Browser2",
-              )
-              for app in bloat_apps:
-                  t = root / "app" / app
+          def tune_product(root):
+              app_dir = root / "app"
+              ax = subprocess.run(["sudo", "getfattr", "--only-values", "-n", "security.selinux", str(app_dir)], capture_output=True, text=True, check=False)
+              se_label = ax.stdout.strip() if (ax.returncode == 0 and ax.stdout.strip()) else "u:object_r:system_file:s0"
+
+              for app in (
+                  "ExactCalculator", "Calculator", "Etar", "Calendar", "DeskClock",
+                  "Glimpse", "Gallery2", "Aperture", "Camera2", "Recorder",
+                  "Eleven", "Twelve", "Music", "Contacts", "Dialer",
+                  "Messaging", "Email", "BasicDreams", "PhotoTable", "Jelly", "Browser2",
+              ):
+                  t = app_dir / app
                   if subprocess.run(["sudo", "test", "-e", str(t)], check=False).returncode == 0:
                       run(["sudo", "rm", "-rf", str(t)])
 
-              for media_sub in ("media/audio/ringtones", "media/audio/alarms", "media/audio/notifications"):
-                  ms = root / media_sub
-                  if subprocess.run(["sudo", "test", "-e", str(ms)], check=False).returncode == 0:
-                      run(["sudo", "rm", "-rf", str(ms)])
+              for ms in ("media/audio/ringtones", "media/audio/alarms", "media/audio/notifications"):
+                  mp = root / ms
+                  if subprocess.run(["sudo", "test", "-e", str(mp)], check=False).returncode == 0:
+                      run(["sudo", "rm", "-rf", str(mp)])
 
-              # 100% SystemUI-safe properties (NO ro.config.low_ram / NO ro.recents.grid)
+              c_dir = app_dir / "GB27Console"
+              c_apk = c_dir / "GB27Console.apk"
+              run(["sudo", "mkdir", "-p", str(c_dir)])
+              run(["sudo", "cp", str(console_apk), str(c_apk)])
+              run(["sudo", "chown", "-R", "0:0", str(c_dir)])
+              run(["sudo", "chmod", "0755", str(c_dir)])
+              run(["sudo", "chmod", "0644", str(c_apk)])
+              run(["sudo", "setfattr", "-n", "security.selinux", "-v", se_label, str(c_dir)])
+              run(["sudo", "setfattr", "-n", "security.selinux", "-v", se_label, str(c_apk)])
+
               props = "\n".join([
                   "",
-                  "# GB27 SystemUI-Safe Low RAM & Low VRAM Props",
+                  "# GB27 Console UltraLite Safe Props",
                   "ro.product.locale=en-US",
                   "persist.sys.locale=en-US",
+                  "debug.sf.nobootanimation=1",
                   "ro.sys.fw.bg_apps_limit=2",
                   "persist.sys.sf.disable_blurs=1",
                   "ro.launcher.blur.appLaunch=0",
-                  "ro.hwui.texture_cache_size=24",
-                  "ro.hwui.layer_cache_size=16",
-                  "ro.hwui.r_buffer_cache_size=4",
-                  "ro.hwui.path_cache_size=8",
+                  "ro.hwui.texture_cache_size=20",
+                  "ro.hwui.layer_cache_size=12",
                   "persist.traced.enable=0",
                   "persist.logd.size=64K",
                   "pm.dexopt.install=speed",
@@ -242,23 +492,15 @@ jobs:
               ])
               bp = root / "etc/build.prop"
               if is_real_file(bp):
-                  pr = subprocess.Popen(
-                      ["sudo", "tee", "-a", str(bp)],
-                      stdin=subprocess.PIPE,
-                      stdout=subprocess.DEVNULL,
-                  )
+                  pr = subprocess.Popen(["sudo", "tee", "-a", str(bp)], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
                   pr.communicate(props.encode("utf-8"))
 
-          def tune_stable_vendor(root):
-              for rc_name in (
-                  "android.hardware.media.c2-service-v4l2.rc",
-                  "boringssl_self_test.rc",
-              ):
+          def tune_vendor(root):
+              for rc_name in ("android.hardware.media.c2-service-v4l2.rc", "boringssl_self_test.rc"):
                   rc_p = root / "etc/init" / rc_name
                   if subprocess.run(["sudo", "test", "-e", str(rc_p)], check=False).returncode == 0:
                       run(["sudo", "rm", "-f", str(rc_p)])
 
-              # Proven OpenGL ES 3.2 isolation without GLThread VRAM spikes
               vk_so = root / "lib64/hw/vulkan.virtio.so"
               if subprocess.run(["sudo", "test", "-e", str(vk_so)], check=False).returncode == 0:
                   run(["sudo", "chown", "1000:1000", str(vk_so)])
@@ -273,17 +515,12 @@ jobs:
                       run(["sudo", "rm", "-f", str(xp)])
 
               vbp = root / "build.prop"
-              cat_res = subprocess.run(
-                  ["sudo", "cat", str(vbp)],
-                  capture_output=True, text=True, check=False,
-              )
+              cat_res = subprocess.run(["sudo", "cat", str(vbp)], capture_output=True, text=True, check=False)
               if cat_res.returncode == 0 and is_real_file(vbp):
-                  replacements = {
+                  rep = {
                       "ro.surface_flinger.supports_background_blur=1": "ro.surface_flinger.supports_background_blur=0",
                       "ro.logd.size=1M": "ro.logd.size=64K",
-                      "ro.logd.size.stats=64K": "ro.logd.size.stats=16K",
                       "tombstoned.max_tombstone_count=100": "tombstoned.max_tombstone_count=1",
-                      "ro.surface_flinger.game_default_frame_rate_override=60": "ro.surface_flinger.game_default_frame_rate_override=120",
                       "ro.vendor.v4l2_codec2.decoder.supported.h264=true": "ro.vendor.v4l2_codec2.decoder.supported.h264=false",
                       "ro.vendor.v4l2_codec2.decoder.supported.hevc=true": "ro.vendor.v4l2_codec2.decoder.supported.hevc=false",
                       "ro.vendor.v4l2_codec2.encoder.supported.h264=true": "ro.vendor.v4l2_codec2.encoder.supported.h264=false",
@@ -291,94 +528,37 @@ jobs:
                       "ro.vendor.fingerprint_virtual_hal_start=true": "ro.vendor.fingerprint_virtual_hal_start=false",
                       "ro.camerax.extensions.enabled=true": "ro.camerax.extensions.enabled=false",
                       "drm.service.enabled=true": "drm.service.enabled=false",
-                      "bluetooth.profile.bap.unicast.client.enabled=true": "bluetooth.profile.bap.unicast.client.enabled=false",
-                      "bluetooth.profile.bas.client.enabled=true": "bluetooth.profile.bas.client.enabled=false",
-                      "bluetooth.profile.ccp.server.enabled=true": "bluetooth.profile.ccp.server.enabled=false",
-                      "bluetooth.profile.csip.set_coordinator.enabled=true": "bluetooth.profile.csip.set_coordinator.enabled=false",
-                      "bluetooth.profile.hap.client.enabled=true": "bluetooth.profile.hap.client.enabled=false",
-                      "bluetooth.profile.mcp.server.enabled=true": "bluetooth.profile.mcp.server.enabled=false",
-                      "bluetooth.profile.vcp.controller.enabled=true": "bluetooth.profile.vcp.controller.enabled=false",
                   }
-                  new_lines = []
-                  for line in cat_res.stdout.splitlines():
-                      s = line.strip()
-                      new_lines.append(replacements.get(s, line))
-                  new_lines += [
-                      "",
-                      "# Low-VRAM Synchronous GLES3 Mode",
-                      "ro.egl.blobcache.multifile=false",
-                      "",
-                  ]
-                  patched_text = "\n".join(new_lines) + "\n"
-                  pr = subprocess.Popen(
-                      ["sudo", "tee", str(vbp)],
-                      stdin=subprocess.PIPE,
-                      stdout=subprocess.DEVNULL,
-                  )
-                  pr.communicate(patched_text.encode("utf-8"))
+                  lines = [rep.get(l.strip(), l) for l in cat_res.stdout.splitlines()]
+                  lines += ["", "ro.egl.blobcache.multifile=false", ""]
+                  pr = subprocess.Popen(["sudo", "tee", str(vbp)], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+                  pr.communicate(("\n".join(lines) + "\n").encode("utf-8"))
 
-          orig_product = pdir / "product.orig.img"
-          shutil.copyfile(pdir / "product.img", orig_product)
+          edit_erofs("product", tune_product)
+          edit_erofs("vendor", tune_vendor)
 
-          edit_erofs_image(pdir / "vendor.img", pdir / "vendor.new.img", tune_stable_vendor, zstd_flag)
-          (pdir / "vendor.new.img").replace(pdir / "vendor.img")
-
+          assembled = Path("/tmp/assembled_console")
+          shutil.rmtree(assembled, ignore_errors=True)
           ubd_tool = Path("upstream/android/lineage-24/tools/ubd-disk.py").resolve()
           policy_p = Path("upstream/android/lineage-24/support/image/disk-policy.json").resolve()
-          assembled = Path("/tmp/assembled_stable_v2")
-
-          assembled_ok = False
-          if lz4_flag:
-              edit_erofs_image(orig_product, pdir / "product.img", tune_stable_product, lz4_flag)
-              shutil.rmtree(assembled, ignore_errors=True)
-              res = subprocess.run([
-                  "python3", str(ubd_tool), "assemble",
-                  "--policy", str(policy_p),
-                  "--images-dir", str(pdir.resolve()),
-                  "--output-dir", str(assembled.resolve()),
-              ])
-              if res.returncode == 0:
-                  assembled_ok = True
-
-          if not assembled_ok:
-              edit_erofs_image(orig_product, pdir / "product.img", tune_stable_product, zstd_flag)
-              shutil.rmtree(assembled, ignore_errors=True)
-              run([
-                  "python3", str(ubd_tool), "assemble",
-                  "--policy", str(policy_p),
-                  "--images-dir", str(pdir.resolve()),
-                  "--output-dir", str(assembled.resolve()),
-              ])
-
-          orig_product.unlink(missing_ok=True)
-          run([
-              "python3", str(ubd_tool), "verify",
-              "--layout", str((assembled / "partition-layout.json").resolve()),
-              "--disk", str((assembled / "system.img").resolve()),
-              "--hash",
-              "--policy", str(policy_p),
-          ])
+          run(["python3", str(ubd_tool), "assemble", "--policy", str(policy_p), "--images-dir", str(pdir.resolve()), "--output-dir", str(assembled.resolve())])
+          run(["python3", str(ubd_tool), "verify", "--layout", str((assembled / "partition-layout.json").resolve()), "--disk", str((assembled / "system.img").resolve()), "--hash", "--policy", str(policy_p)])
 
           shutil.copyfile(assembled / "system.img", disk_p)
           shutil.copyfile(assembled / "partition-layout.json", layout_p)
-
           for item in manifest["inventory"]:
               rel = item.get("path")
               if rel in ("boot/kernel-command-line.txt", "guest/partition-layout.json", "guest/system.img"):
                   item["size"] = (bsys / rel).stat().st_size
-          manifest_p.write_text(
-              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          print("SUCCESS! StableLowMemV2 system.img size:", disk_p.stat().st_size, flush=True)
+          manifest_p.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-      - name: Step 4 - Repackage Stable LowMem V2 IPA
+      - name: Step 4 - Repackage GB27 Console IPA
         run: |
           cd work
-          zip -q -r -y ../GB27-StableLowMemV2-OpenGLES3.ipa Payload
+          zip -q -r -y ../GB27-Console-UltraLite.ipa Payload
 
-      - name: Step 5 - Upload GB27 Stable LowMem V2 IPA
+      - name: Step 5 - Upload GB27 Console UltraLite IPA
         uses: actions/upload-artifact@v4
         with:
-          name: GB27-StableLowMemV2-OpenGLES3-IPA
-          path: GB27-StableLowMemV2-OpenGLES3.ipa
+          name: GB27-Console-UltraLite-IPA
+          path: GB27-Console-UltraLite.ipa
