@@ -1,11 +1,11 @@
-name: Inspect Kernarium iOS UI Source
+name: Get HomeView and Xcode Build Info
 
 on:
   push:
   workflow_dispatch:
 
 jobs:
-  inspect-ios-ui:
+  get-homeview-info:
     runs-on: ubuntu-latest
     steps:
       - name: Step 1 - Checkout Kernarium Repository
@@ -14,52 +14,58 @@ jobs:
           repository: imxieyi/Kernarium
           path: upstream
 
-      - name: Step 2 - Export iOS SwiftUI Structure and Views
+      - name: Step 2 - Collect HomeView, GuestHost, and Xcode Project Files
         shell: python3 {0}
         run: |
           from pathlib import Path
 
           root = Path("upstream")
-          out_dir = Path("ios_report")
-          out_dir.mkdir(exist_ok=True)
+          out = Path("homeview_info")
+          out.mkdir(exist_ok=True)
 
-          all_files = sorted(
-              str(p.relative_to(root))
-              for p in root.rglob("*")
-              if p.is_file() and ".git/" not in str(p)
-          )
-          (out_dir / "repo-files.txt").write_text("\n".join(all_files) + "\n", encoding="utf-8")
+          # 1. List all files under Andarium/, scripts/, darwin/, CMake*
+          tree_lines = []
+          for p in sorted(root.rglob("*")):
+              if p.is_file() and ".git/" not in str(p):
+                  rel = str(p.relative_to(root))
+                  if rel.startswith(("Andarium/", "scripts/", "darwin/", "CMake", ".github/")):
+                      tree_lines.append(f"{p.stat().st_size:10d}  {rel}")
+          (out / "1-project-tree.txt").write_text("\n".join(tree_lines) + "\n", encoding="utf-8")
 
-          swift_chunks = []
-          for rel in all_files:
-              low = rel.lower()
-              if (
-                  low.endswith(".swift")
-                  or low.endswith("project.yml")
-                  or low.endswith("package.swift")
-                  or (".github/workflows/" in low and low.endswith(".yml"))
-                  or ("pbxproj" in low)
-              ):
-                  p = root / rel
-                  if p.stat().st_size <= 120000:
+          # 2. Dump all Swift/ObjC/C/plist/pbxproj files under Andarium/ (excluding Tests & Preview)
+          ui_chunks = []
+          andarium_dir = root / "Andarium"
+          if andarium_dir.exists():
+              for p in sorted(andarium_dir.rglob("*")):
+                  if not p.is_file():
+                      continue
+                  rel = str(p.relative_to(root))
+                  if "Tests/" in rel or "/Preview/" in rel or rel.endswith(".png"):
+                      continue
+                  if p.stat().st_size <= 200000:
                       txt = p.read_text(encoding="utf-8", errors="replace")
-                      swift_chunks.append(f"===== FILE: {rel} =====\n{txt}\n")
+                      ui_chunks.append(f"=== FILE: {rel} ===\n{txt}\n")
+          (out / "2-andarium-ui-and-project.txt").write_text("\n".join(ui_chunks), encoding="utf-8")
 
-          joined = "\n".join(swift_chunks)
-          # Split if large so easy to upload/read
-          max_part = 350000
-          if len(joined) <= max_part:
-              (out_dir / "ios-swift-sources.txt").write_text(joined, encoding="utf-8")
-          else:
-              for idx in range(0, len(joined), max_part):
-                  part_no = idx // max_part + 1
-                  (out_dir / f"ios-swift-sources-part{part_no}.txt").write_text(
-                      joined[idx:idx + max_part], encoding="utf-8"
-                  )
-          print("Exported repo files count:", len(all_files), flush=True)
+          # 3. Dump packaging/build scripts and CMakePresets
+          build_chunks = []
+          for p in sorted(root.rglob("*")):
+              if not p.is_file() or ".git/" not in str(p) and False:
+                  continue
+              rel = str(p.relative_to(root))
+              if (
+                  rel in ("CMakeLists.txt", "CMakePresets.json", "darwin/CMakeLists.txt")
+                  or (rel.startswith("scripts/") and p.stat().st_size <= 80000)
+                  or (rel.startswith("darwin/runtime_loader") and p.stat().st_size <= 80000)
+                  or (rel.startswith(".github/workflows/") and p.stat().st_size <= 80000)
+              ):
+                  txt = p.read_text(encoding="utf-8", errors="replace")
+                  build_chunks.append(f"=== FILE: {rel} ===\n{txt}\n")
+          (out / "3-build-and-cmake.txt").write_text("\n".join(build_chunks), encoding="utf-8")
+          print("Collected all HomeView & Xcode build files successfully!", flush=True)
 
-      - name: Step 3 - Upload iOS UI Report
+      - name: Step 3 - Upload HomeView Build Info
         uses: actions/upload-artifact@v4
         with:
-          name: Kernarium-iOS-UI-Report
-          path: ios_report/
+          name: HomeView-Build-Info
+          path: homeview_info/
